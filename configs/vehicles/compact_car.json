@@ -1,0 +1,8 @@
+{
+  "name": "compact_car",
+  "wheelbase": 2.6,
+  "length": 4.2,
+  "width": 1.8,
+  "rear_overhang": 0.8,
+  "max_steering_angle": 0.83
+}

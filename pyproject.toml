@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vehicle-motion-planner"
+version = "0.1.0"
+description = "Low-speed Ackermann vehicle planning with forward and reverse maneuvers"
+requires-python = ">=3.10"
+
+[project.scripts]
+vehicle-plan = "vehicle_planner.cli:main"
+
+[tool.setuptools]
+packages = ["vehicle_planner"]

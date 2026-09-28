@@ -1,0 +1,30 @@
+{
+  "name": "reverse_into_bay",
+  "start": {"x": 0.0, "y": -1.0, "theta": 1.5707963267948966},
+  "goal": {"x": 0.0, "y": -4.15, "theta": 1.5707963267948966},
+  "obstacles": [
+    {
+      "name": "parked_vehicle_left",
+      "min_x": -3.2,
+      "min_y": -5.25,
+      "max_x": -0.95,
+      "max_y": -2.55
+    },
+    {
+      "name": "parked_vehicle_right",
+      "min_x": 0.95,
+      "min_y": -5.25,
+      "max_x": 3.2,
+      "max_y": -2.55
+    },
+    {
+      "name": "rear_wall",
+      "min_x": -3.2,
+      "min_y": -5.7,
+      "max_x": 3.2,
+      "max_y": -5.25
+    }
+  ],
+  "goal_tolerance": {"position": 0.28, "heading": 0.2},
+  "bounds": [-6.0, -7.0, 6.0, 3.0]
+}

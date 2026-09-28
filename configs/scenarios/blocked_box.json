@@ -1,0 +1,13 @@
+{
+  "name": "blocked_box",
+  "start": {"x": 0.0, "y": 0.0, "theta": 0.0},
+  "goal": {"x": 6.0, "y": 0.0, "theta": 0.0},
+  "obstacles": [
+    {"name": "north_wall", "min_x": -3.0, "min_y": 2.1, "max_x": 3.0, "max_y": 2.4},
+    {"name": "south_wall", "min_x": -3.0, "min_y": -2.4, "max_x": 3.0, "max_y": -2.1},
+    {"name": "west_wall", "min_x": -2.7, "min_y": -2.4, "max_x": -2.4, "max_y": 2.4},
+    {"name": "east_wall", "min_x": 2.4, "min_y": -2.4, "max_x": 2.7, "max_y": 2.4}
+  ],
+  "goal_tolerance": {"position": 0.3, "heading": 0.2},
+  "bounds": [-4.0, -3.5, 8.0, 3.5]
+}

@@ -1,0 +1,41 @@
+{
+  "vehicle_name": "compact_car",
+  "scenario_name": "narrow_uturn",
+  "status": "solved",
+  "commands": [
+    {
+      "steering_angle": -0.83,
+      "velocity": 1.0,
+      "duration": 2.4900600578051284
+    },
+    {
+      "steering_angle": 0.83,
+      "velocity": -1.0,
+      "duration": 2.4900600578051284
+    },
+    {
+      "steering_angle": -0.83,
+      "velocity": 1.0,
+      "duration": 2.4900600578051284
+    }
+  ],
+  "start": {
+    "x": -3.0,
+    "y": 0.0,
+    "theta": 0.0
+  },
+  "goal": {
+    "x": -3.0,
+    "y": 0.0,
+    "theta": 3.141592653589793
+  },
+  "metadata": {
+    "expansions": 147,
+    "reason": "",
+    "goal_pose": {
+      "x": -3.0,
+      "y": -6.661338147750939e-16,
+      "theta": -3.141592653589793
+    }
+  }
+}

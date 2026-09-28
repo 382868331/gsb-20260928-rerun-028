@@ -1,0 +1,21 @@
+{
+  "vehicle_name": "compact_car",
+  "scenario_name": "blocked_box",
+  "status": "no_path",
+  "commands": [],
+  "start": {
+    "x": 0.0,
+    "y": 0.0,
+    "theta": 0.0
+  },
+  "goal": {
+    "x": 6.0,
+    "y": 0.0,
+    "theta": 0.0
+  },
+  "metadata": {
+    "expansions": 1,
+    "reason": "search space exhausted",
+    "goal_pose": null
+  }
+}
