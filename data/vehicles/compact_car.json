@@ -1,0 +1,11 @@
+{
+  "name": "compact_car",
+  "length": 4.2,
+  "width": 1.8,
+  "wheelbase": 2.7,
+  "front_overhang": 0.85,
+  "rear_overhang": 0.65,
+  "max_steering_angle": 0.55,
+  "max_speed": 2.0,
+  "min_turning_radius": 4.23
+}

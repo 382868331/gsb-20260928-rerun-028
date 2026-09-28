@@ -1,0 +1,11 @@
+{
+  "name": "narrow_uturn",
+  "bounds": [0.0, 0.0, 14.0, 7.5],
+  "obstacles": [],
+  "start": [2.0, 2.8, 0.0],
+  "goal": [10.2, 4.7, 3.141592653589793],
+  "goal_tolerance": {
+    "xy": 0.18,
+    "theta": 0.14
+  }
+}
