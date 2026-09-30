@@ -16,6 +16,30 @@ class Motion:
 
 
 @dataclass(frozen=True)
+class Action:
+    """One timed control action: drive, stop-and-wait, or gear transition."""
+
+    type: str
+    start_time: float
+    end_time: float
+    direction: int = 0
+    steering: float = 0.0
+    distance: float = 0.0
+    reason: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.type,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "direction": self.direction,
+            "steering": self.steering,
+            "distance": self.distance,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
 class PlanResult:
     status: str
     vehicle: str
@@ -27,6 +51,8 @@ class PlanResult:
     nodes_expanded: int
     max_nodes: int
     message: str
+    actions: tuple[Action, ...] = ()
+    scene_signature: str = ""
 
     @property
     def found(self) -> bool:
@@ -34,7 +60,17 @@ class PlanResult:
 
     @property
     def total_distance(self) -> float:
+        if self.actions:
+            return sum(abs(item.distance) for item in self.actions if item.type == "drive")
         return sum(abs(item.distance) for item in self.motions)
+
+    @property
+    def timed(self) -> bool:
+        return bool(self.actions)
+
+    @property
+    def final_time(self) -> float:
+        return self.actions[-1].end_time if self.actions else 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -56,7 +92,24 @@ class PlanResult:
                 for item in self.motions
             ],
             "states": [[x, y, theta] for x, y, theta in self.states],
+            "actions": [item.to_dict() for item in self.actions],
+            "scene_signature": self.scene_signature,
         }
+
+
+def _actions_from_dict(data: dict) -> tuple[Action, ...]:
+    return tuple(
+        Action(
+            type=str(item["type"]),
+            start_time=float(item["start_time"]),
+            end_time=float(item["end_time"]),
+            direction=int(item.get("direction", 0)),
+            steering=float(item.get("steering", 0.0)),
+            distance=float(item.get("distance", 0.0)),
+            reason=str(item.get("reason", "")),
+        )
+        for item in data.get("actions", ())
+    )
 
 
 def load_plan(path: str | Path) -> PlanResult:
@@ -79,6 +132,8 @@ def load_plan(path: str | Path) -> PlanResult:
         nodes_expanded=int(data["nodes_expanded"]),
         max_nodes=int(data["max_nodes"]),
         message=data.get("message", ""),
+        actions=_actions_from_dict(data),
+        scene_signature=str(data.get("scene_signature", "")),
     )
 
 

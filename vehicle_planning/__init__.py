@@ -4,6 +4,7 @@ from .vehicle import Vehicle
 from .scene import Scene, load_scene, save_scene
 from .planner import Planner, PlannerStatus
 from .plan import PlanResult, load_plan, save_plan
+from .scheduler import Scheduler, SchedulerConfig, SchedulerStatus
 
 __all__ = [
     "Vehicle",
@@ -15,4 +16,7 @@ __all__ = [
     "PlanResult",
     "load_plan",
     "save_plan",
+    "Scheduler",
+    "SchedulerConfig",
+    "SchedulerStatus",
 ]

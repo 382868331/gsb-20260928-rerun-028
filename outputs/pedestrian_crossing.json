@@ -1,0 +1,513 @@
+{
+  "status": "path_found",
+  "message": "timed schedule found, total time 18.96s",
+  "vehicle": "compact_car",
+  "scene": "pedestrian_crossing",
+  "start_pose": [
+    2.0,
+    2.5,
+    0.0
+  ],
+  "goal_pose": [
+    7.0,
+    6.65,
+    1.5707963267948966
+  ],
+  "nodes_expanded": 10404,
+  "max_nodes": 120000,
+  "total_distance": 15.07,
+  "motions": [
+    {
+      "direction": 1,
+      "steering": -0.55,
+      "distance": 0.4
+    },
+    {
+      "direction": 1,
+      "steering": -0.55,
+      "distance": 0.4
+    },
+    {
+      "direction": 1,
+      "steering": -0.55,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.275,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.55,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.275,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.55,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.55,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.55,
+      "distance": 0.75
+    },
+    {
+      "direction": -1,
+      "steering": -0.55,
+      "distance": 0.4
+    },
+    {
+      "direction": -1,
+      "steering": -0.55,
+      "distance": 0.75
+    },
+    {
+      "direction": -1,
+      "steering": -0.55,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.55,
+      "distance": 0.75
+    },
+    {
+      "direction": -1,
+      "steering": -0.55,
+      "distance": 0.4
+    },
+    {
+      "direction": -1,
+      "steering": -0.55,
+      "distance": 0.4
+    },
+    {
+      "direction": 1,
+      "steering": 0.55,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.275,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.32
+    }
+  ],
+  "states": [
+    [
+      2.0,
+      2.5,
+      0.0
+    ],
+    [
+      2.399450216044558,
+      2.4818464055975187,
+      -0.09083040196861258
+    ],
+    [
+      2.795607168224695,
+      2.4275352895427096,
+      -0.18166080393722517
+    ],
+    [
+      3.5181949641756782,
+      2.2300293247191734,
+      -0.3519678076283741
+    ],
+    [
+      4.231623591528619,
+      1.9993093230534666,
+      -0.27359319223393364
+    ],
+    [
+      4.967456858059445,
+      1.8589842259939935,
+      -0.10328618854278471
+    ],
+    [
+      5.715725088853985,
+      1.8109552734868322,
+      -0.024911573148344246
+    ],
+    [
+      6.463460173928521,
+      1.856054847173864,
+      0.14539543054280468
+    ],
+    [
+      7.192733914062852,
+      2.0272317759600216,
+      0.3157024342339536
+    ],
+    [
+      7.882445183231544,
+      2.319533151563844,
+      0.48600943792510254
+    ],
+    [
+      7.537729313071763,
+      2.1168980190034734,
+      0.5768398398937151
+    ],
+    [
+      6.946867602134203,
+      1.6564371981445045,
+      0.747146843584864
+    ],
+    [
+      6.442595182092579,
+      1.1024958155203681,
+      0.917453847276013
+    ],
+    [
+      6.845687472022684,
+      1.7338897771616568,
+      1.087760850967162
+    ],
+    [
+      6.676231657327104,
+      1.3717092214251139,
+      1.1785912529357745
+    ],
+    [
+      6.54032617098192,
+      0.9956510784883434,
+      1.269421654904387
+    ],
+    [
+      6.701037026723139,
+      1.7273024639480454,
+      1.439728658595536
+    ],
+    [
+      6.769832770463108,
+      2.4739478089001112,
+      1.5181032739899765
+    ],
+    [
+      6.809334274442099,
+      3.222906840612392,
+      1.5181032739899765
+    ],
+    [
+      6.8488357784210905,
+      3.971865872324673,
+      1.5181032739899765
+    ],
+    [
+      6.888337282400082,
+      4.720824904036954,
+      1.5181032739899765
+    ],
+    [
+      6.927838786379073,
+      5.469783935749235,
+      1.5181032739899765
+    ],
+    [
+      6.967340290358065,
+      6.218742967461516,
+      1.5181032739899765
+    ],
+    [
+      6.984194265389101,
+      6.53829882099209,
+      1.5181032739899765
+    ]
+  ],
+  "actions": [
+    {
+      "type": "drive",
+      "start_time": 0.0,
+      "end_time": 0.33333333333333337,
+      "direction": 1,
+      "steering": -0.55,
+      "distance": 0.4,
+      "reason": ""
+    },
+    {
+      "type": "drive",
+      "start_time": 0.33333333333333337,
+      "end_time": 0.6666666666666667,
+      "direction": 1,
+      "steering": -0.55,
+      "distance": 0.4,
+      "reason": ""
+    },
+    {
+      "type": "drive",
+      "start_time": 0.6666666666666667,
+      "end_time": 1.2916666666666667,
+      "direction": 1,
+      "steering": -0.55,
+      "distance": 0.75,
+      "reason": ""
+    },
+    {
+      "type": "drive",
+      "start_time": 1.2916666666666667,
+      "end_time": 1.9166666666666667,
+      "direction": 1,
+      "steering": 0.275,
+      "distance": 0.75,
+      "reason": ""
+    },
+    {
+      "type": "drive",
+      "start_time": 1.9166666666666667,
+      "end_time": 2.541666666666667,
+      "direction": 1,
+      "steering": 0.55,
+      "distance": 0.75,
+      "reason": ""
+    },
+    {
+      "type": "drive",
+      "start_time": 2.541666666666667,
+      "end_time": 3.166666666666667,
+      "direction": 1,
+      "steering": 0.275,
+      "distance": 0.75,
+      "reason": ""
+    },
+    {
+      "type": "drive",
+      "start_time": 3.166666666666667,
+      "end_time": 3.791666666666667,
+      "direction": 1,
+      "steering": 0.55,
+      "distance": 0.75,
+      "reason": ""
+    },
+    {
+      "type": "drive",
+      "start_time": 3.791666666666667,
+      "end_time": 4.416666666666667,
+      "direction": 1,
+      "steering": 0.55,
+      "distance": 0.75,
+      "reason": ""
+    },
+    {
+      "type": "wait",
+      "start_time": 4.416666666666667,
+      "end_time": 4.816666666666667,
+      "direction": 0,
+      "steering": 0.0,
+      "distance": 0.0,
+      "reason": "通道被动态障碍 trolley 临时占用，原地等待 0.4s 后继续"
+    },
+    {
+      "type": "drive",
+      "start_time": 4.816666666666667,
+      "end_time": 5.441666666666667,
+      "direction": 1,
+      "steering": 0.55,
+      "distance": 0.75,
+      "reason": ""
+    },
+    {
+      "type": "gear_switch",
+      "start_time": 5.441666666666667,
+      "end_time": 6.941666666666667,
+      "direction": -1,
+      "steering": 0.0,
+      "distance": 0.0,
+      "reason": "前进切倒车，计入换挡过渡时间"
+    },
+    {
+      "type": "drive",
+      "start_time": 6.941666666666667,
+      "end_time": 7.275,
+      "direction": -1,
+      "steering": -0.55,
+      "distance": 0.4,
+      "reason": ""
+    },
+    {
+      "type": "drive",
+      "start_time": 7.275,
+      "end_time": 7.9,
+      "direction": -1,
+      "steering": -0.55,
+      "distance": 0.75,
+      "reason": ""
+    },
+    {
+      "type": "drive",
+      "start_time": 7.9,
+      "end_time": 8.525,
+      "direction": -1,
+      "steering": -0.55,
+      "distance": 0.75,
+      "reason": ""
+    },
+    {
+      "type": "gear_switch",
+      "start_time": 8.525,
+      "end_time": 10.025,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.0,
+      "reason": "倒车切前进，计入换挡过渡时间"
+    },
+    {
+      "type": "drive",
+      "start_time": 10.025,
+      "end_time": 10.65,
+      "direction": 1,
+      "steering": 0.55,
+      "distance": 0.75,
+      "reason": ""
+    },
+    {
+      "type": "gear_switch",
+      "start_time": 10.65,
+      "end_time": 12.15,
+      "direction": -1,
+      "steering": 0.0,
+      "distance": 0.0,
+      "reason": "前进切倒车，计入换挡过渡时间"
+    },
+    {
+      "type": "drive",
+      "start_time": 12.15,
+      "end_time": 12.483333333333334,
+      "direction": -1,
+      "steering": -0.55,
+      "distance": 0.4,
+      "reason": ""
+    },
+    {
+      "type": "drive",
+      "start_time": 12.483333333333334,
+      "end_time": 12.816666666666668,
+      "direction": -1,
+      "steering": -0.55,
+      "distance": 0.4,
+      "reason": ""
+    },
+    {
+      "type": "gear_switch",
+      "start_time": 12.816666666666668,
+      "end_time": 14.316666666666668,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.0,
+      "reason": "倒车切前进，计入换挡过渡时间"
+    },
+    {
+      "type": "drive",
+      "start_time": 14.316666666666668,
+      "end_time": 14.941666666666668,
+      "direction": 1,
+      "steering": 0.55,
+      "distance": 0.75,
+      "reason": ""
+    },
+    {
+      "type": "drive",
+      "start_time": 14.941666666666668,
+      "end_time": 15.566666666666668,
+      "direction": 1,
+      "steering": 0.275,
+      "distance": 0.75,
+      "reason": ""
+    },
+    {
+      "type": "drive",
+      "start_time": 15.566666666666668,
+      "end_time": 16.19166666666667,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": ""
+    },
+    {
+      "type": "drive",
+      "start_time": 16.19166666666667,
+      "end_time": 16.81666666666667,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": ""
+    },
+    {
+      "type": "drive",
+      "start_time": 16.81666666666667,
+      "end_time": 17.44166666666667,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": ""
+    },
+    {
+      "type": "drive",
+      "start_time": 17.44166666666667,
+      "end_time": 18.06666666666667,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": ""
+    },
+    {
+      "type": "drive",
+      "start_time": 18.06666666666667,
+      "end_time": 18.69166666666667,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": ""
+    },
+    {
+      "type": "drive",
+      "start_time": 18.69166666666667,
+      "end_time": 18.958333333333336,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.32,
+      "reason": ""
+    }
+  ],
+  "scene_signature": "4e0226a9784596f1b08017f696bb7b0ef689650949d902fe79849d9fcc3724db"
+}
