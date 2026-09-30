@@ -1,0 +1,63 @@
+{
+  "schema": "reopen_assessment_v1",
+  "original_plan_path": "outputs/pedestrian_crossing.json",
+  "old_scene_signature": "4e0226a9784596f1b08017f696bb7b0ef689650949d902fe79849d9fcc3724db",
+  "new_scene_signature": "5c52083c03777277702146a0fa16a82a20a5e0e773855b26f55c48331f367315",
+  "timetable_changed": true,
+  "original_feasible": false,
+  "conflicts": [
+    {
+      "start_time": 5.025,
+      "end_time": 6.442,
+      "duration": 1.417,
+      "obstacles": [
+        "trolley"
+      ],
+      "context": "gear_switch",
+      "samples": 21
+    }
+  ],
+  "options": {
+    "original": {
+      "description": "保留原路线与原时间安排，直接面对新时间表",
+      "feasible": false,
+      "route_changed": false,
+      "timing_changed": false,
+      "same_route": true,
+      "departure_delay": 0.0,
+      "final_time": 0.0,
+      "total_wait": 0.0,
+      "message": "scene or dynamic-obstacle timetable changed; saved plan must be re-planned",
+      "scene_signature": "5c52083c03777277702146a0fa16a82a20a5e0e773855b26f55c48331f367315"
+    },
+    "delayed": {
+      "description": "保留原路线，仅延后出发（整体平移时间轴，先试时间再试路径）",
+      "feasible": true,
+      "route_changed": false,
+      "timing_changed": true,
+      "same_route": true,
+      "departure_delay": 1.5,
+      "final_time": 20.458,
+      "total_wait": 1.9,
+      "message": "timed replay verified against static and moving obstacles, final time 20.46s",
+      "scene_signature": "5c52083c03777277702146a0fa16a82a20a5e0e773855b26f55c48331f367315"
+    },
+    "replanned": {
+      "description": "在新时间表上重新搜索行驶路径并重新排时",
+      "feasible": true,
+      "route_changed": true,
+      "timing_changed": true,
+      "same_route": false,
+      "departure_delay": 0.0,
+      "final_time": 27.025,
+      "total_wait": 1.8,
+      "message": "timed schedule found, total time 27.02s",
+      "scene_signature": "5c52083c03777277702146a0fa16a82a20a5e0e773855b26f55c48331f367315"
+    }
+  },
+  "recommendation": "delayed",
+  "option_plan_files": {
+    "delayed": "late_report_delayed.json",
+    "replanned": "late_report_replanned.json"
+  }
+}

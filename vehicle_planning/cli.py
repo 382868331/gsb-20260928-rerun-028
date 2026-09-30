@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 
 from .motion import standard_primitives
 from .plan import load_plan, save_plan
 from .planner import Planner, PlannerConfig
 from .replay import render_svg, replay
+from .reopen import (
+    evaluate_reopen,
+    save_reopen_bundle,
+)
 from .scheduler import Scheduler, SchedulerConfig
 from .scene import load_scene
 from .vehicle import load_vehicle
@@ -37,6 +42,20 @@ def build_parser() -> argparse.ArgumentParser:
     replay_parser.add_argument("--scene", required=True)
     replay_parser.add_argument("--plan", required=True)
     replay_parser.add_argument("--svg")
+
+    reopen_parser = sub.add_parser(
+        "reopen",
+        help="reopen a successful plan against a changed obstacle timetable",
+    )
+    reopen_parser.add_argument("--vehicle", required=True)
+    reopen_parser.add_argument("--scene", required=True, help="new timetable scene file")
+    reopen_parser.add_argument("--plan", required=True, help="original successful plan (never rewritten)")
+    reopen_parser.add_argument("--output", required=True, help="assessment report json path")
+    reopen_parser.add_argument("--max-delay", type=float, default=30.0)
+    reopen_parser.add_argument("--delay-step", type=float, default=0.2)
+    reopen_parser.add_argument("--primitive-length", type=float, nargs="+", default=[0.4, 0.75])
+    reopen_parser.add_argument("--cruise-speed", type=float, default=1.2)
+    reopen_parser.add_argument("--gear-switch-time", type=float, default=1.5)
     return parser
 
 
@@ -89,6 +108,48 @@ def main(argv: list[str] | None = None) -> int:
                     print(
                         f"  {action.type} {action.start_time:6.2f}-{action.end_time:6.2f}s: {action.reason}"
                     )
+        return 0
+
+    if args.command == "reopen":
+        original = load_plan(args.plan)
+        primitives = standard_primitives(
+            vehicle,
+            lengths=tuple(args.primitive_length),
+            steering_steps=2,
+        )
+        scheduler_config = SchedulerConfig(
+            cruise_speed=args.cruise_speed,
+            gear_switch_time=args.gear_switch_time,
+        )
+        assessment = evaluate_reopen(
+            original,
+            vehicle,
+            scene,
+            max_delay=args.max_delay,
+            delay_step=args.delay_step,
+            primitives=primitives,
+            scheduler_config=scheduler_config,
+        )
+        assessment = replace(assessment, original_plan_path=args.plan)
+        save_reopen_bundle(assessment, None, args.output)
+        print(f"timetable_changed={assessment.timetable_changed}")
+        print(
+            f"original feasible={assessment.original_feasible}, "
+            f"conflict_intervals={len(assessment.conflicts)}"
+        )
+        for conflict in assessment.conflicts:
+            names = ",".join(conflict.obstacles) or "static"
+            print(
+                f"  conflict {conflict.start_time:6.2f}-{conflict.end_time:6.2f}s "
+                f"({names}, {conflict.context}, samples={conflict.samples})"
+            )
+        for option in assessment.options:
+            print(
+                f"{option.key:9s} feasible={option.feasible} "
+                f"route_changed={option.route_changed} timing_changed={option.timing_changed} "
+                f"delay={option.departure_delay:.2f}s final={option.final_time:.2f}s"
+            )
+        print(f"recommendation={assessment.recommendation}")
         return 0
 
     result = load_plan(args.plan)

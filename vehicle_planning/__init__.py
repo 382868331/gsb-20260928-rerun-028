@@ -5,6 +5,15 @@ from .scene import Scene, load_scene, save_scene
 from .planner import Planner, PlannerStatus
 from .plan import PlanResult, load_plan, save_plan
 from .scheduler import Scheduler, SchedulerConfig, SchedulerStatus
+from .reopen import (
+    ConflictInterval,
+    ReopenAssessment,
+    ReopenOption,
+    evaluate_reopen,
+    same_route,
+    same_timing,
+    scan_conflicts,
+)
 
 __all__ = [
     "Vehicle",
@@ -19,4 +28,11 @@ __all__ = [
     "Scheduler",
     "SchedulerConfig",
     "SchedulerStatus",
+    "ConflictInterval",
+    "ReopenAssessment",
+    "ReopenOption",
+    "evaluate_reopen",
+    "same_route",
+    "same_timing",
+    "scan_conflicts",
 ]
