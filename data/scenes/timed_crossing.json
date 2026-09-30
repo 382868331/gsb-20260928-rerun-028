@@ -1,0 +1,21 @@
+{
+  "name": "timed_crossing",
+  "bounds": [0.0, 1.8, 20.5, 5.2],
+  "obstacles": [],
+  "dynamic_obstacles": [
+    {
+      "name": "crossing_cart",
+      "footprint": [[-1.0, -0.6], [1.0, -0.6], [1.0, 0.6], [-1.0, 0.6]],
+      "timetable": [
+        {"time": 0.0, "x": 8.0, "y": 1.0, "theta": 0.0},
+        {"time": 6.0, "x": 8.0, "y": 7.0, "theta": 0.0}
+      ]
+    }
+  ],
+  "start": [2.0, 3.5, 0.0],
+  "goal": [16.0, 3.5, 0.0],
+  "goal_tolerance": {
+    "xy": 0.18,
+    "theta": 0.14
+  }
+}

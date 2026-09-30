@@ -23,6 +23,10 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument("--primitive-length", type=float, nargs="+", default=[0.4, 0.75])
     plan_parser.add_argument("--xy-resolution", type=float, default=0.25)
     plan_parser.add_argument("--theta-resolution", type=float, default=0.12)
+    plan_parser.add_argument("--speed", type=float, default=1.0)
+    plan_parser.add_argument("--gear-shift-time", type=float, default=2.0)
+    plan_parser.add_argument("--max-wait-time", type=float, default=25.0)
+    plan_parser.add_argument("--max-makespan", type=float, default=90.0)
 
     replay_parser = sub.add_parser("replay", help="replay a saved plan and render SVG")
     replay_parser.add_argument("--vehicle", required=True)
@@ -51,6 +55,10 @@ def main(argv: list[str] | None = None) -> int:
                 max_expanded_nodes=args.max_nodes,
                 xy_resolution=args.xy_resolution,
                 theta_resolution=args.theta_resolution,
+                speed=args.speed,
+                gear_shift_time=args.gear_shift_time,
+                max_wait_time=args.max_wait_time,
+                max_makespan=args.max_makespan,
             ),
         )
         result = planner.plan()
@@ -59,12 +67,18 @@ def main(argv: list[str] | None = None) -> int:
         save_plan(result, output)
         print(result.status, result.message)
         print(f"nodes_expanded={result.nodes_expanded}, segments={len(result.motions)}")
+        if result.found:
+            print(f"makespan={result.makespan:.2f}s, waits={len(result.waits)}")
+            for action in result.waits:
+                print(f"  wait {action.t0:.2f}-{action.t1:.2f}s: {action.reason}")
         return 0
 
     result = load_plan(args.plan)
     report = replay(result, vehicle, scene)
     print(f"valid={report.valid} samples={report.samples}")
     print(f"xy_error={report.goal_xy_error:.4f} m, theta_error={report.goal_theta_error:.4f} rad")
+    if report.timetable_changed:
+        print("timetable_changed=True: plan re-verified against the current obstacle timetable")
     print(report.message)
     if args.svg and result.found:
         render_svg(result, vehicle, scene, args.svg)

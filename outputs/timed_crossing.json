@@ -1,0 +1,442 @@
+{
+  "status": "path_found",
+  "message": "kinematically feasible timed path found",
+  "vehicle": "compact_car",
+  "scene": "timed_crossing",
+  "start_pose": [
+    2.0,
+    3.5,
+    0.0
+  ],
+  "goal_pose": [
+    16.0,
+    3.5,
+    0.0
+  ],
+  "nodes_expanded": 35,
+  "max_nodes": 120000,
+  "total_distance": 13.875,
+  "motions": [
+    {
+      "direction": 1,
+      "steering": -0.55,
+      "distance": 0.4
+    },
+    {
+      "direction": 1,
+      "steering": -0.55,
+      "distance": 0.4
+    },
+    {
+      "direction": 1,
+      "steering": 0.275,
+      "distance": 0.4
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.55,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75
+    },
+    {
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.675
+    }
+  ],
+  "states": [
+    [
+      2.0,
+      3.5,
+      0.0
+    ],
+    [
+      2.399450216044558,
+      3.4818464055975187,
+      -0.09083040196861258
+    ],
+    [
+      2.795607168224695,
+      3.4275352895427096,
+      -0.18166080393722517
+    ],
+    [
+      3.1904207324911837,
+      3.3635122114907032,
+      -0.13986100906019017
+    ],
+    [
+      3.93309726889855,
+      3.25895809980705,
+      -0.13986100906019017
+    ],
+    [
+      4.681070501281627,
+      3.217997476806565,
+      0.03044599463095876
+    ],
+    [
+      5.4307229186615285,
+      3.2408284451712572,
+      0.03044599463095876
+    ],
+    [
+      6.18037533604143,
+      3.2636594135359496,
+      0.03044599463095876
+    ],
+    [
+      6.9300277534213315,
+      3.286490381900642,
+      0.03044599463095876
+    ],
+    [
+      7.679680170801233,
+      3.3093213502653342,
+      0.03044599463095876
+    ],
+    [
+      8.429332588181135,
+      3.3321523186300266,
+      0.03044599463095876
+    ],
+    [
+      9.178985005561037,
+      3.354983286994719,
+      0.03044599463095876
+    ],
+    [
+      9.92863742294094,
+      3.3778142553594113,
+      0.03044599463095876
+    ],
+    [
+      10.678289840320842,
+      3.4006452237241036,
+      0.03044599463095876
+    ],
+    [
+      11.427942257700744,
+      3.423476192088796,
+      0.03044599463095876
+    ],
+    [
+      12.177594675080647,
+      3.4463071604534883,
+      0.03044599463095876
+    ],
+    [
+      12.927247092460549,
+      3.4691381288181806,
+      0.03044599463095876
+    ],
+    [
+      13.676899509840451,
+      3.491969097182873,
+      0.03044599463095876
+    ],
+    [
+      14.426551927220354,
+      3.5148000655475653,
+      0.03044599463095876
+    ],
+    [
+      15.176204344600256,
+      3.5376310339122576,
+      0.03044599463095876
+    ],
+    [
+      15.850891520242168,
+      3.5581789054404807,
+      0.03044599463095876
+    ]
+  ],
+  "timetable_signature": "87aaf01796689eec",
+  "makespan": 15.875,
+  "timeline": [
+    {
+      "kind": "drive",
+      "t0": 0.0,
+      "t1": 0.4,
+      "duration": 0.4,
+      "direction": 1,
+      "steering": -0.55,
+      "distance": 0.4,
+      "reason": "forward driving"
+    },
+    {
+      "kind": "drive",
+      "t0": 0.4,
+      "t1": 0.8,
+      "duration": 0.4,
+      "direction": 1,
+      "steering": -0.55,
+      "distance": 0.4,
+      "reason": "forward driving"
+    },
+    {
+      "kind": "drive",
+      "t0": 0.8,
+      "t1": 1.2,
+      "duration": 0.4,
+      "direction": 1,
+      "steering": 0.275,
+      "distance": 0.4,
+      "reason": "forward driving"
+    },
+    {
+      "kind": "wait",
+      "t0": 1.2,
+      "t1": 3.2,
+      "duration": 2.0,
+      "direction": 0,
+      "steering": 0.0,
+      "distance": 0.0,
+      "reason": "hold position for passing dynamic obstacle(s): crossing_cart"
+    },
+    {
+      "kind": "drive",
+      "t0": 3.2,
+      "t1": 3.95,
+      "duration": 0.75,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": "forward driving"
+    },
+    {
+      "kind": "drive",
+      "t0": 3.95,
+      "t1": 4.7,
+      "duration": 0.75,
+      "direction": 1,
+      "steering": 0.55,
+      "distance": 0.75,
+      "reason": "forward driving"
+    },
+    {
+      "kind": "drive",
+      "t0": 4.7,
+      "t1": 5.45,
+      "duration": 0.75,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": "forward driving"
+    },
+    {
+      "kind": "drive",
+      "t0": 5.45,
+      "t1": 6.2,
+      "duration": 0.75,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": "forward driving"
+    },
+    {
+      "kind": "drive",
+      "t0": 6.2,
+      "t1": 6.95,
+      "duration": 0.75,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": "forward driving"
+    },
+    {
+      "kind": "drive",
+      "t0": 6.95,
+      "t1": 7.7,
+      "duration": 0.75,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": "forward driving"
+    },
+    {
+      "kind": "drive",
+      "t0": 7.7,
+      "t1": 8.45,
+      "duration": 0.75,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": "forward driving"
+    },
+    {
+      "kind": "drive",
+      "t0": 8.45,
+      "t1": 9.2,
+      "duration": 0.75,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": "forward driving"
+    },
+    {
+      "kind": "drive",
+      "t0": 9.2,
+      "t1": 9.95,
+      "duration": 0.75,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": "forward driving"
+    },
+    {
+      "kind": "drive",
+      "t0": 9.95,
+      "t1": 10.7,
+      "duration": 0.75,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": "forward driving"
+    },
+    {
+      "kind": "drive",
+      "t0": 10.7,
+      "t1": 11.45,
+      "duration": 0.75,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": "forward driving"
+    },
+    {
+      "kind": "drive",
+      "t0": 11.45,
+      "t1": 12.2,
+      "duration": 0.75,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": "forward driving"
+    },
+    {
+      "kind": "drive",
+      "t0": 12.2,
+      "t1": 12.95,
+      "duration": 0.75,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": "forward driving"
+    },
+    {
+      "kind": "drive",
+      "t0": 12.95,
+      "t1": 13.7,
+      "duration": 0.75,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": "forward driving"
+    },
+    {
+      "kind": "drive",
+      "t0": 13.7,
+      "t1": 14.45,
+      "duration": 0.75,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": "forward driving"
+    },
+    {
+      "kind": "drive",
+      "t0": 14.45,
+      "t1": 15.2,
+      "duration": 0.75,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.75,
+      "reason": "forward driving"
+    },
+    {
+      "kind": "drive",
+      "t0": 15.2,
+      "t1": 15.875,
+      "duration": 0.675,
+      "direction": 1,
+      "steering": 0.0,
+      "distance": 0.675,
+      "reason": "forward driving"
+    }
+  ]
+}
