@@ -117,14 +117,19 @@ def _replay_timed(plan, vehicle, scene, collision_step):
     checked += 1
 
     for index, action in enumerate(plan.actions):
-        if action.start_time < previous_end - 1e-9:
+        expected_start = time_now
+        # A leading wait action is an explicit departure delay: it may start
+        # at t=0 while the vehicle holds the start pose before driving off.
+        if index == 0 and action.type == "wait":
+            expected_start = 0.0
+        if action.start_time < expected_start - 1e-9:
             return ReplayReport(False, checked, math.inf, math.inf, "action timeline is not ordered")
         if action.end_time < action.start_time - 1e-9:
             return ReplayReport(False, checked, math.inf, math.inf, f"{action.type} action has negative duration")
         duration = action.end_time - action.start_time
 
         if action.type in ("wait", "gear_switch"):
-            if abs(action.start_time - time_now) > 1e-9:
+            if abs(action.start_time - expected_start) > 1e-9:
                 return ReplayReport(False, checked, math.inf, math.inf, f"time gap before {action.type} at index {index}")
             probes = max(1, int(math.ceil(duration / 0.1)))
             for sub in range(probes + 1):
@@ -140,7 +145,7 @@ def _replay_timed(plan, vehicle, scene, collision_step):
         if action.type != "drive":
             return ReplayReport(False, checked, math.inf, math.inf, f"unknown action type {action.type}")
 
-        if abs(action.start_time - time_now) > 1e-9:
+        if abs(action.start_time - expected_start) > 1e-9:
             return ReplayReport(False, checked, math.inf, math.inf, f"time gap before drive at index {index}")
         distance = action.distance
         arc = sample_arc(

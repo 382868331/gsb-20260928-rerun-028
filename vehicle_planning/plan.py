@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -53,6 +54,9 @@ class PlanResult:
     message: str
     actions: tuple[Action, ...] = ()
     scene_signature: str = ""
+    route_signature: str = ""
+    timetable_signature: str = ""
+    variant: str = ""
 
     @property
     def found(self) -> bool:
@@ -94,6 +98,9 @@ class PlanResult:
             "states": [[x, y, theta] for x, y, theta in self.states],
             "actions": [item.to_dict() for item in self.actions],
             "scene_signature": self.scene_signature,
+            "route_signature": self.route_signature,
+            "timetable_signature": self.timetable_signature,
+            "variant": self.variant,
         }
 
 
@@ -134,6 +141,9 @@ def load_plan(path: str | Path) -> PlanResult:
         message=data.get("message", ""),
         actions=_actions_from_dict(data),
         scene_signature=str(data.get("scene_signature", "")),
+        route_signature=str(data.get("route_signature", "")),
+        timetable_signature=str(data.get("timetable_signature", "")),
+        variant=str(data.get("variant", "")),
     )
 
 
@@ -142,6 +152,26 @@ def save_plan(plan: PlanResult, path: str | Path) -> None:
         json.dumps(plan.to_dict(), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def compute_route_signature(
+    start_pose: Pose,
+    goal_pose: Pose,
+    motions: Sequence[Motion],
+    states: Sequence[Pose],
+) -> str:
+    """Hash of the geometric route only; independent of any obstacle timetable."""
+
+    payload = {
+        "start_pose": list(start_pose),
+        "goal_pose": list(goal_pose),
+        "motions": [
+            [item.direction, item.steering, item.distance] for item in motions
+        ],
+        "states": [list(state) for state in states],
+    }
+    encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def save_states_csv(states: Sequence[Pose], path: str | Path) -> None:

@@ -133,6 +133,32 @@ class Scene:
         encoded = json.dumps(self.to_dict(), sort_keys=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
+    def geometry_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "bounds": list(self.bounds),
+            "obstacles": [[[x, y] for x, y in polygon] for polygon in self.obstacles],
+            "start": list(self.start),
+            "goal": list(self.goal),
+            "goal_tolerance": {
+                "xy": self.goal_xy_tolerance,
+                "theta": self.goal_theta_tolerance,
+            },
+        }
+
+    def geometry_signature(self) -> str:
+        """Hash of the static scene geometry only, excluding obstacle timetables."""
+
+        encoded = json.dumps(self.geometry_dict(), sort_keys=True).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def timetable_signature(self) -> str:
+        """Hash of the dynamic-obstacle timetable only."""
+
+        payload = [item.to_dict() for item in self.dynamic_obstacles]
+        encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
 
 def _polygon(data: Sequence[Sequence[float]]) -> Polygon:
     polygon = tuple((float(point[0]), float(point[1])) for point in data)

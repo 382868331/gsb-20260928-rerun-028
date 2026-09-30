@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from .motion import standard_primitives
 from .plan import load_plan, save_plan
 from .planner import Planner, PlannerConfig
 from .replay import render_svg, replay
+from .replan import compare_alternatives
 from .scheduler import Scheduler, SchedulerConfig
 from .scene import load_scene
 from .vehicle import load_vehicle
@@ -37,6 +39,26 @@ def build_parser() -> argparse.ArgumentParser:
     replay_parser.add_argument("--scene", required=True)
     replay_parser.add_argument("--plan", required=True)
     replay_parser.add_argument("--svg")
+    replay_parser.add_argument("--report")
+
+    replan_parser = sub.add_parser(
+        "replan",
+        help="re-evaluate a saved plan against a changed timetable",
+    )
+    replan_parser.add_argument("--vehicle", required=True)
+    replan_parser.add_argument("--scene", required=True)
+    replan_parser.add_argument("--plan", required=True, help="previously successful plan (kept untouched)")
+    replan_parser.add_argument("--primitive-length", type=float, nargs="+", default=[0.4, 0.75])
+    replan_parser.add_argument("--cruise-speed", type=float, default=1.2)
+    replan_parser.add_argument("--gear-switch-time", type=float, default=1.5)
+    replan_parser.add_argument("--max-wait", type=float, default=60.0)
+    replan_parser.add_argument("--max-nodes", type=int, default=60_000)
+    replan_parser.add_argument("--report", help="write the three-alternative comparison as JSON")
+    replan_parser.add_argument(
+        "--output",
+        help="save the recommended delayed/replanned variant (the original file is never overwritten)",
+    )
+    replan_parser.add_argument("--no-route-replan", action="store_true")
     return parser
 
 
@@ -92,6 +114,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     result = load_plan(args.plan)
+    if args.command == "replan":
+        return _run_replan(args, vehicle, scene, result)
+
     report = replay(result, vehicle, scene)
     print(f"valid={report.valid} samples={report.samples}")
     print(f"xy_error={report.goal_xy_error:.4f} m, theta_error={report.goal_theta_error:.4f} rad")
@@ -99,7 +124,75 @@ def main(argv: list[str] | None = None) -> int:
     if args.svg and result.found:
         render_svg(result, vehicle, scene, args.svg)
         print(f"svg={args.svg}")
+    if args.report:
+        Path(args.report).write_text(json.dumps(vars(report), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(f"report={args.report}")
     return 0 if report.valid else 1
+
+
+def _run_replan(args, vehicle, scene, old_plan):
+    primitives = standard_primitives(
+        vehicle,
+        lengths=tuple(args.primitive_length),
+        steering_steps=2,
+    )
+    comparison = compare_alternatives(
+        old_plan,
+        vehicle,
+        scene,
+        primitives,
+        scheduler_config=SchedulerConfig(
+            cruise_speed=args.cruise_speed,
+            gear_switch_time=args.gear_switch_time,
+            max_wait=args.max_wait,
+        ),
+        planner_config=PlannerConfig(max_expanded_nodes=args.max_nodes),
+        allow_replan=not args.no_route_replan,
+    )
+
+    print(f"timetable_changed={comparison.timetable_changed}")
+    print(comparison.message)
+    for alternative in (
+        comparison.original,
+        comparison.delayed,
+        comparison.replanned,
+    ):
+        if alternative is None:
+            continue
+        print(
+            f"[{alternative.key}] feasible={alternative.feasible} "
+            f"route_changed={alternative.route_changed} "
+            f"timing_changed={alternative.timing_changed} "
+            f"final_time={alternative.final_time:.2f}"
+        )
+        print(f"    {alternative.message}")
+        for conflict in alternative.conflicts:
+            print(
+                "    conflict "
+                f"t={conflict.start_time:.2f}-{conflict.end_time:.2f}s "
+                f"obstacle={conflict.obstacle} during {conflict.action_type}"
+            )
+
+    if args.report:
+        Path(args.report).write_text(
+            json.dumps(comparison.to_dict(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(f"report={args.report}")
+
+    if args.output:
+        chosen = {
+            "delayed": comparison.delayed,
+            "replanned": comparison.replanned,
+        }.get(comparison.recommended)
+        if chosen is None or not chosen.feasible or chosen.plan is None:
+            print("no feasible delayed/replanned variant to save; original plan left untouched")
+            return 1
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        save_plan(chosen.plan, output)
+        print(f"saved {comparison.recommended} variant -> {output}")
+    return 0
 
 
 if __name__ == "__main__":

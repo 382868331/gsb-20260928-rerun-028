@@ -17,7 +17,7 @@ import math
 from dataclasses import dataclass
 
 from .motion import sample_arc
-from .plan import Action, PlanResult
+from .plan import Action, PlanResult, compute_route_signature
 from .scene import Scene
 from .vehicle import Vehicle
 
@@ -35,6 +35,8 @@ class SchedulerConfig:
     gear_switch_time: float = 1.5
     max_wait: float = 60.0
     time_collision_step: float = 0.1
+    initial_delay: float = 0.0
+    variant: str = ""
 
 
 @dataclass
@@ -62,6 +64,22 @@ class Scheduler:
         time_now = 0.0
         gear = 1
         actions = []
+        route_signature = plan.route_signature or compute_route_signature(
+            plan.start_pose, plan.goal_pose, plan.motions, plan.states
+        )
+        if cfg.initial_delay > 0.0:
+            actions.append(
+                Action(
+                    type="wait",
+                    start_time=0.0,
+                    end_time=cfg.initial_delay,
+                    reason=(
+                        "旧时间表失效，按新时间表整体延后 "
+                        f"{cfg.initial_delay:.1f}s 出发，路线保持不变"
+                    ),
+                )
+            )
+            time_now = cfg.initial_delay
         try:
             for motion_index, motion in enumerate(plan.motions):
                 if motion.direction != gear:
@@ -115,9 +133,15 @@ class Scheduler:
             message=f"timed schedule found, total time {time_now:.2f}s",
             actions=tuple(actions),
             scene_signature=self.scene.signature(),
+            route_signature=route_signature,
+            timetable_signature=self.scene.timetable_signature(),
+            variant=cfg.variant or plan.variant,
         )
 
     def _failure(self, plan, message):
+        route_signature = plan.route_signature or compute_route_signature(
+            plan.start_pose, plan.goal_pose, plan.motions, plan.states
+        )
         return PlanResult(
             status=SchedulerStatus.SCHEDULE_FAILED,
             vehicle=plan.vehicle,
@@ -131,6 +155,9 @@ class Scheduler:
             message=message,
             actions=(),
             scene_signature=self.scene.signature(),
+            route_signature=route_signature,
+            timetable_signature=self.scene.timetable_signature(),
+            variant=self.config.variant or plan.variant,
         )
 
     def _wait_if_blocked(self, pose, time_now, context, actions):
