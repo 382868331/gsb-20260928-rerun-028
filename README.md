@@ -55,11 +55,11 @@ python -m vehicle_planning.cli replay \
 
 ## 障碍时间表变化后重开
 
-方案与场景签名绑定。障碍时间表一旦变化（即使障碍只是移远、原几何路线其实仍走得通），旧方案不能单独“重新验证”，必须以“重开规划问题”的方式处理；原成功方案文件保持不变，失败结果不会覆盖旧的成功记录。
+方案与场景签名绑定。障碍时间表一旦变化（即使障碍只是移远、原几何路线其实仍走得通），旧方案不能靠签名校验“重新验证”，必须以“重开规划问题”的方式处理；重开时原路线会**独立面对新时间表**逐时刻核对——零冲突即判可行，与“延后零秒、时间安排未变”的方案结论一致；原成功方案文件保持不变，失败结果不会覆盖旧的成功记录。
 
 `python -m vehicle_planning.cli reopen` 保留原路线并对**新时间表**依次评估三种方案，路线变化与时间安排变化分别标记：
 
-- `original`：原路线、原时间安排直接面对新时间表；给出是否仍可执行，以及逐时刻扫描出的具体冲突区间（起止时刻、持续时长、障碍名称、发生在 drive/换挡/等待哪个阶段）。
+- `original`：原路线、原时间安排直接面对新时间表（绕开签名校验做独立重放）；给出是否仍可执行，以及逐时刻扫描出的具体冲突区间（起止时刻、持续时长、障碍名称、发生在 drive/换挡/等待哪个阶段）。零冲突时与 `delayed` 的 0 秒延后判定一致。
 - `delayed`：先只调整出发/等待时间（整体平移时间轴并补一个初始等待动作），路线几何完全不变；找到最小可行延后量即采用。
 - `replanned`：延后也无法避开时，在新时间表上重新搜索几何路径并重新排时，单独标记 `route_changed` 与 `timing_changed`。
 
@@ -71,7 +71,19 @@ python -m vehicle_planning.cli reopen \
   --output outputs/reopen/report.json
 ```
 
-报告会写入 `reopen_assessment_v1` JSON，并在同目录保存各可行方案（如 `report_delayed.json`、`report_replanned.json`）。每个重开方案都带**新时间表**的 `scene_signature`：对新时间表可独立回放成功，对旧时间表仍因签名不一致而失效；原方案只通过路径引用，绝不改写。覆盖障碍提前到达、延迟离开（需延后出发）以及完全避开路线（无几何冲突但仍必须重开）三类情况。
+报告会写入 `reopen_assessment_v1` JSON，并在同目录保存各可行方案（如 `report_original.json`、`report_delayed.json`、`report_selected_window.json`、`report_replanned.json`）。每个重开方案都带**新时间表**的 `scene_signature`：对新时间表可独立回放成功，对旧时间表仍因签名不一致而失效；原方案只通过路径引用，绝不改写。覆盖障碍提前到达、延迟离开（需延后出发）以及完全避开路线（无几何冲突但仍必须重开）三类情况。
+
+### 出发时间安全区间
+
+给定 `--earliest-departure` 与 `--latest-departure`（单位：相对原计划的延后秒数）后，报告会额外写入 `departure_windows`：两个边界时刻**首先**单独探测（`boundaries` 中给出能否在该边界出发及占用障碍），内部按 `--departure-step` 等间隔探测，相邻同结论探测合并为窗口：
+
+- `safe`：窗口内所有探测的出发时刻沿原路线全程扫描均无冲突，可执行；
+- `blocked`：被具体障碍占用打断，窗口记录障碍名称；
+- `unverified`：探测预算（`--departure-budget`，默认 300 次）耗尽后未核对的尾部，**不会**被写成安全。
+
+分析会从安全区间中选出最小可行出发时刻 `selected_departure`，按原路线生成带新签名的 `report_selected_window.json` 并全程回放核对（`selected_verified`）。
+
+保存比较结果后再次更换障碍安排时，可用 `--historical-report` 传入上一份报告：旧时间表下的区间只作为历史结论标注——签名一致为 `same_timetable`（仍需按需复核），签名不同为 `needs_recheck`，当前窗口的安全/占用结论一律来自新时间表的新鲜探测，绝不沿用旧标记。
 
 ## 测试
 

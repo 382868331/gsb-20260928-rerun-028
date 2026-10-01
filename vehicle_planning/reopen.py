@@ -16,6 +16,7 @@ final time) are reported independently.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -54,8 +55,9 @@ def _timed_footprints(plan: PlanResult, vehicle: Vehicle, collision_step: float 
     yield 0.0, vehicle.footprint(*pose), "start"
     for action in plan.actions:
         if action.type in ("wait", "gear_switch"):
-            steps = max(1, int(round((action.end_time - action.start_time) / 0.1)))
-            for index in range(1, steps + 1):
+            duration = action.end_time - action.start_time
+            steps = max(1, int(math.ceil(duration / 0.1)))
+            for index in range(steps + 1):
                 at_time = action.start_time + (action.end_time - action.start_time) * index / steps
                 yield at_time, vehicle.footprint(*pose), action.type
             continue
@@ -216,6 +218,272 @@ def find_delayed_plan(
     return found_delay, delayed_plan, message
 
 
+@dataclass(frozen=True)
+class DepartureWindow:
+    """One classified sub-interval of the user's departure-time range."""
+
+    kind: str  # "safe" | "blocked" | "unverified"
+    start_time: float
+    end_time: float
+    obstacles: tuple[str, ...] = ()
+    note: str = ""
+
+    def to_dict(self) -> dict:
+        payload = {
+            "kind": self.kind,
+            "start_time": round(self.start_time, 3),
+            "end_time": round(self.end_time, 3),
+            "duration": round(self.end_time - self.start_time, 3),
+        }
+        if self.obstacles:
+            payload["obstacles"] = list(self.obstacles)
+        if self.note:
+            payload["note"] = self.note
+        return payload
+
+
+@dataclass(frozen=True)
+class BoundaryProbe:
+    label: str
+    departure_time: float
+    feasible: bool
+    obstacles: tuple[str, ...]
+
+    def to_dict(self) -> dict:
+        return {
+            "label": self.label,
+            "departure_time": round(self.departure_time, 3),
+            "feasible": self.feasible,
+            "obstacles": list(self.obstacles),
+        }
+
+
+@dataclass(frozen=True)
+class DepartureWindowAnalysis:
+    """Result of scanning a user-bounded departure-time range."""
+
+    earliest_departure: float
+    latest_departure: float
+    step: float
+    probes_requested: int
+    probes_completed: int
+    budget_exhausted: bool
+    boundaries: tuple[BoundaryProbe, ...]
+    windows: tuple[DepartureWindow, ...]
+    selected_departure: float | None
+    selected_verified: bool
+    schedule_signature: str
+    historical_signature: str | None = None
+    historical_status: str = "none"  # none | same_timetable | needs_recheck
+
+    def to_dict(self) -> dict:
+        return {
+            "earliest_departure": round(self.earliest_departure, 3),
+            "latest_departure": round(self.latest_departure, 3),
+            "step": round(self.step, 3),
+            "probes_requested": self.probes_requested,
+            "probes_completed": self.probes_completed,
+            "budget_exhausted": self.budget_exhausted,
+            "boundaries": [item.to_dict() for item in self.boundaries],
+            "windows": [item.to_dict() for item in self.windows],
+            "selected_departure": (
+                round(self.selected_departure, 3)
+                if self.selected_departure is not None
+                else None
+            ),
+            "selected_verified": self.selected_verified,
+            "schedule_signature": self.schedule_signature,
+            "historical_signature": self.historical_signature,
+            "historical_status": self.historical_status,
+        }
+
+
+def _probe_departure(
+    aligned: PlanResult,
+    vehicle: Vehicle,
+    new_scene: Scene,
+    departure: float,
+) -> tuple[bool, tuple[str, ...], PlanResult]:
+    """Check one departure time over the whole unchanged route on the new timetable.
+
+    The candidate carries the new timetable signature and is replayed in the
+    normal (signature-enforcing) mode, so a "safe" probe is independently
+    verifiable and never inherited from an old success mark.
+    """
+    new_signature = new_scene.signature()
+    actions = _shift_actions(
+        aligned.actions,
+        departure,
+        f"障碍时间表变化，延后 {departure:.1f}s 出发（路线不变）",
+    )
+    candidate = replace(aligned, actions=actions, scene_signature=new_signature)
+    conflicts = scan_conflicts(candidate, vehicle, new_scene)
+    if conflicts:
+        names = tuple(
+            sorted({name for item in conflicts for name in item.obstacles})
+        )
+        return False, names, candidate
+    report = replay(candidate, vehicle, new_scene)
+    return report.valid, (), candidate
+
+
+def analyze_departure_windows(
+    original: PlanResult,
+    vehicle: Vehicle,
+    new_scene: Scene,
+    *,
+    earliest_departure: float = 0.0,
+    latest_departure: float,
+    step: float = 0.2,
+    max_probes: int = 300,
+) -> DepartureWindowAnalysis:
+    """Classify a departure-time range into safe / blocked / unverified windows.
+
+    The two user-given boundaries are always probed first (boundary departure
+    feasibility is reported explicitly). Interior departure times are probed
+    on a regular grid. Neighbouring probes of one kind merge into a window;
+    if the computation budget runs out the unprobed tail stays "unverified"
+    and is never presented as safe.
+    """
+    if earliest_departure < -1e-9:
+        raise ValueError("earliest departure time must be non-negative")
+    if latest_departure < earliest_departure - 1e-9:
+        raise ValueError("latest departure time must be >= earliest departure time")
+    if step <= 0.0:
+        raise ValueError("departure step must be positive")
+
+    aligned = (
+        original
+        if original.scene == new_scene.name
+        else replace(original, scene=new_scene.name)
+    )
+    new_signature = new_scene.signature()
+
+    grid = [earliest_departure]
+    interior_count = max(
+        0, int(math.floor((latest_departure - earliest_departure) / step + 1e-9)) - 1
+    )
+    for index in range(1, interior_count + 1):
+        grid.append(earliest_departure + index * step)
+    if abs(grid[-1] - latest_departure) > 1e-9:
+        grid.append(latest_departure)
+    probes_requested = len(grid)
+
+    results: dict[float, tuple[bool, tuple[str, ...]]] = {}
+    selected_departure: float | None = None
+    budget_exhausted = False
+    completed = 0
+    for departure in grid:
+        if completed >= max_probes:
+            budget_exhausted = True
+            break
+        feasible, names, _ = _probe_departure(aligned, vehicle, new_scene, departure)
+        rounded = round(departure, 9)
+        results[rounded] = (feasible, names)
+        completed += 1
+        if feasible and selected_departure is None:
+            selected_departure = rounded
+
+    boundaries = tuple(
+        BoundaryProbe(
+            label=("earliest" if index == 0 else "latest"),
+            departure_time=value,
+            feasible=(results[round(value, 9)][0]
+                      if round(value, 9) in results else False),
+            obstacles=(results.get(round(value, 9), (False, ()))[1]),
+        )
+        for index, value in enumerate((earliest_departure, latest_departure))
+    )
+
+    windows: list[DepartureWindow] = []
+    probed = sorted(results)
+    half = step / 2.0
+    for index, departure in enumerate(probed):
+        feasible, names = results[departure]
+        left = earliest_departure if index == 0 else departure - half
+        right = latest_departure if index == len(probed) - 1 else departure + half
+        if index == 0 and len(probed) > 1:
+            left = departure
+        if index == len(probed) - 1 and len(probed) > 1:
+            right = departure
+        left = max(left, earliest_departure)
+        right = min(right, latest_departure)
+        kind = "safe" if feasible else "blocked"
+        note = "" if feasible else "出发窗口内全程扫描到具体障碍占用"
+        windows.append(
+            DepartureWindow(
+                kind=kind,
+                start_time=left,
+                end_time=right,
+                obstacles=names,
+                note=note,
+            )
+        )
+
+    merged: list[DepartureWindow] = []
+    for window in windows:
+        if merged and merged[-1].kind == window.kind and merged[-1].obstacles == window.obstacles:
+            merged[-1] = DepartureWindow(
+                kind=window.kind,
+                start_time=merged[-1].start_time,
+                end_time=window.end_time,
+                obstacles=window.obstacles,
+                note=window.note,
+            )
+        else:
+            merged.append(window)
+
+    if budget_exhausted and probed:
+        merged.append(
+            DepartureWindow(
+                kind="unverified",
+                start_time=probed[-1] + half,
+                end_time=latest_departure,
+                note="计算预算不足，未完成逐出发时刻核对，不能判定为安全",
+            )
+        )
+
+    return DepartureWindowAnalysis(
+        earliest_departure=earliest_departure,
+        latest_departure=latest_departure,
+        step=step,
+        probes_requested=probes_requested,
+        probes_completed=completed,
+        budget_exhausted=budget_exhausted,
+        boundaries=boundaries,
+        windows=tuple(merged),
+        selected_departure=selected_departure,
+        selected_verified=selected_departure is not None,
+        schedule_signature=new_signature,
+    )
+
+
+def attach_historical_windows(
+    analysis: DepartureWindowAnalysis,
+    historical_report: dict | None,
+) -> DepartureWindowAnalysis:
+    """Tag a previous report's windows without adopting them as current truth.
+
+    A previous conclusion is only comparable when it was produced for the
+    exact same timetable signature; any other old report is a historical
+    conclusion that must be re-checked.
+    """
+    if not historical_report:
+        return analysis
+    old = historical_report.get("departure_windows") or {}
+    old_signature = old.get("schedule_signature")
+    status = (
+        "same_timetable"
+        if old_signature == analysis.schedule_signature
+        else "needs_recheck"
+    )
+    return replace(
+        analysis,
+        historical_signature=old_signature,
+        historical_status=status,
+    )
+
+
 def run_full_replan(
     vehicle: Vehicle,
     new_scene: Scene,
@@ -276,6 +544,7 @@ class ReopenAssessment:
     options: tuple[ReopenOption, ...]
     recommendation: str
     option_plans: dict[str, PlanResult] | None = None
+    departure_windows: DepartureWindowAnalysis | None = None
 
     def option(self, key: str) -> ReopenOption:
         return next(item for item in self.options if item.key == key)
@@ -291,6 +560,11 @@ class ReopenAssessment:
             "conflicts": [item.to_dict() for item in self.conflicts],
             "options": {item.key: item.to_dict() for item in self.options},
             "recommendation": self.recommendation,
+            **(
+                {"departure_windows": self.departure_windows.to_dict()}
+                if self.departure_windows is not None
+                else {}
+            ),
         }
 
 
@@ -304,6 +578,11 @@ def evaluate_reopen(
     primitives=None,
     planner_config=None,
     scheduler_config: SchedulerConfig | None = None,
+    earliest_departure: float | None = None,
+    latest_departure: float | None = None,
+    departure_step: float = 0.2,
+    departure_budget: int = 300,
+    historical_report: dict | None = None,
 ) -> ReopenAssessment:
     """Reopen a successful plan against a changed obstacle timetable.
 
@@ -324,7 +603,11 @@ def evaluate_reopen(
     timetable_changed = original.scene_signature != new_signature
     conflicts = tuple(scan_conflicts(original, vehicle, new_scene))
 
-    original_report = replay(aligned, vehicle, new_scene)
+    # The original route faces the NEW timetable on its own merits: replay in
+    # signature-bypass mode so a timetable hash change alone cannot reject a
+    # route that has zero conflicts. This keeps the verdict consistent with
+    # the delayed option at delay 0 and with scan_conflicts().
+    original_report = replay(aligned, vehicle, new_scene, enforce_signature=False)
     original_feasible = original_report.valid
 
     options: list[ReopenOption] = [
@@ -367,6 +650,13 @@ def evaluate_reopen(
         )
     )
 
+    # A feasible original schedule is re-bound to the NEW timetable signature
+    # when saved, so it independently replays against the new timetable while
+    # the original success file on disk is referenced and never rewritten.
+    original_resigned = None
+    if original_feasible:
+        original_resigned = replace(aligned, scene_signature=new_signature)
+
     replanned = run_full_replan(
         vehicle,
         new_scene,
@@ -401,6 +691,30 @@ def evaluate_reopen(
     else:
         recommendation = "none"
 
+    departure_analysis = None
+    if earliest_departure is not None and latest_departure is not None:
+        departure_analysis = analyze_departure_windows(
+            original,
+            vehicle,
+            new_scene,
+            earliest_departure=earliest_departure,
+            latest_departure=latest_departure,
+            step=departure_step,
+            max_probes=departure_budget,
+        )
+        departure_analysis = attach_historical_windows(
+            departure_analysis, historical_report
+        )
+
+    selected_plan = None
+    if departure_analysis is not None and departure_analysis.selected_departure is not None:
+        _, _, selected_plan = _probe_departure(
+            aligned,
+            vehicle,
+            new_scene,
+            departure_analysis.selected_departure,
+        )
+
     return ReopenAssessment(
         original_plan_path="",
         old_scene_signature=original.scene_signature,
@@ -411,9 +725,12 @@ def evaluate_reopen(
         options=tuple(options),
         recommendation=recommendation,
         option_plans={
+            **({"original": original_resigned} if original_resigned is not None else {}),
             **({"delayed": delayed_plan} if delayed_plan is not None else {}),
+            **({"selected_window": selected_plan} if selected_plan is not None else {}),
             **({"replanned": replanned} if replan_feasible else {}),
         },
+        departure_windows=departure_analysis,
     )
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -56,6 +57,25 @@ def build_parser() -> argparse.ArgumentParser:
     reopen_parser.add_argument("--primitive-length", type=float, nargs="+", default=[0.4, 0.75])
     reopen_parser.add_argument("--cruise-speed", type=float, default=1.2)
     reopen_parser.add_argument("--gear-switch-time", type=float, default=1.5)
+    reopen_parser.add_argument(
+        "--earliest-departure",
+        type=float,
+        default=None,
+        help="departure window lower bound (seconds of delay); enables window analysis",
+    )
+    reopen_parser.add_argument("--latest-departure", type=float, default=None)
+    reopen_parser.add_argument("--departure-step", type=float, default=0.2)
+    reopen_parser.add_argument(
+        "--departure-budget",
+        type=int,
+        default=300,
+        help="max number of departure probes; unprobed tail is marked unverified",
+    )
+    reopen_parser.add_argument(
+        "--historical-report",
+        default=None,
+        help="previous reopen report json; its windows are tagged, never adopted as safe",
+    )
     return parser
 
 
@@ -121,6 +141,9 @@ def main(argv: list[str] | None = None) -> int:
             cruise_speed=args.cruise_speed,
             gear_switch_time=args.gear_switch_time,
         )
+        historical = None
+        if args.historical_report:
+            historical = json.loads(Path(args.historical_report).read_text(encoding="utf-8"))
         assessment = evaluate_reopen(
             original,
             vehicle,
@@ -129,6 +152,11 @@ def main(argv: list[str] | None = None) -> int:
             delay_step=args.delay_step,
             primitives=primitives,
             scheduler_config=scheduler_config,
+            earliest_departure=args.earliest_departure,
+            latest_departure=args.latest_departure,
+            departure_step=args.departure_step,
+            departure_budget=args.departure_budget,
+            historical_report=historical,
         )
         assessment = replace(assessment, original_plan_path=args.plan)
         save_reopen_bundle(assessment, None, args.output)
@@ -149,6 +177,28 @@ def main(argv: list[str] | None = None) -> int:
                 f"route_changed={option.route_changed} timing_changed={option.timing_changed} "
                 f"delay={option.departure_delay:.2f}s final={option.final_time:.2f}s"
             )
+        if assessment.departure_windows is not None:
+            windows = assessment.departure_windows
+            print(
+                f"departure window [{windows.earliest_departure:.2f}, "
+                f"{windows.latest_departure:.2f}]s probes={windows.probes_completed}/"
+                f"{windows.probes_requested} budget_exhausted={windows.budget_exhausted}"
+            )
+            for boundary in windows.boundaries:
+                print(
+                    f"  {boundary.label:8s} t={boundary.departure_time:6.2f}s "
+                    f"feasible={boundary.feasible} "
+                    f"obstacles={','.join(boundary.obstacles) or '-'}"
+                )
+            for window in windows.windows:
+                names = ",".join(window.obstacles) or "-"
+                print(
+                    f"  {window.kind:10s} {window.start_time:6.2f}-{window.end_time:6.2f}s "
+                    f"obstacles={names}"
+                )
+            if windows.selected_departure is not None:
+                print(f"selected_departure={windows.selected_departure:.2f}s (fully verified)")
+            print(f"historical_status={windows.historical_status}")
         print(f"recommendation={assessment.recommendation}")
         return 0
 

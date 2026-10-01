@@ -12,6 +12,8 @@ import pytest
 from vehicle_planning.cli import main
 from vehicle_planning.plan import load_plan, save_plan
 from vehicle_planning.reopen import (
+    analyze_departure_windows,
+    attach_historical_windows,
     evaluate_reopen,
     find_delayed_plan,
     same_route,
@@ -79,15 +81,28 @@ def cheap_replan(base, monkeypatch):
     monkeypatch.setattr(reopen_module, "run_full_replan", run_full_replan)
 
 
-def test_changed_timetable_cannot_be_revalidated_even_when_obstacle_moves_away(base, cheap_replan):
+def test_changed_timetable_route_faces_new_schedule_on_its_own_merits(base, cheap_replan):
     vehicle, data, plan = base
     for frames in (EARLY_LEAVE, AVOID):
         scene = changed_scene(data, frames)
+        # The signature-bound old plan is not reusable as-is ...
         assert replay(plan, vehicle, scene).valid is False
         assessment = evaluate_reopen(plan, vehicle, scene, max_delay=0.0)
         assert assessment.timetable_changed is True
-        assert assessment.original_feasible is False
-        assert "re-planned" in assessment.option("original").message
+        # ... but the original route, judged independently on the new timetable
+        # with zero conflicts, must get the same verdict as a zero-second
+        # "delay" (whose timing is unchanged).
+        assert assessment.conflicts == ()
+        assert assessment.original_feasible is True
+        assert assessment.option("original").timing_changed is False
+        assert assessment.option("delayed").feasible is True
+        assert assessment.option("delayed").departure_delay == 0.0
+        assert assessment.recommendation == "original"
+        # The saved copy is rebound to the new timetable and replays on it.
+        rebound = assessment.option_plans["original"]
+        assert rebound.scene_signature == scene.signature()
+        assert same_route(rebound, plan) and same_timing(rebound, plan)
+        assert replay(rebound, vehicle, scene).valid
         assert assessment.conflicts == ()
 
 
@@ -137,6 +152,109 @@ def test_late_obstacle_conflicts_on_original_schedule_but_delay_resolves(base, c
     assert delayed.route_changed is False
     assert delayed.timing_changed is True
 
+
+def test_departure_windows_classify_safe_blocked_and_boundaries(base):
+    vehicle, data, plan = base
+    scene = changed_scene(data, EARLY)
+    analysis = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=8.0, step=0.5,
+    )
+    assert analysis.probes_requested == 17
+    assert analysis.budget_exhausted is False
+    labels = {item.label: item for item in analysis.boundaries}
+    assert labels["earliest"].departure_time == 0.0
+    assert labels["latest"].departure_time == 8.0
+    kinds = [window.kind for window in analysis.windows]
+    assert "safe" in kinds and "blocked" in kinds and "unverified" not in kinds
+    blocked = [window for window in analysis.windows if window.kind == "blocked"]
+    assert all(window.obstacles for window in blocked)
+    # A time selected from a safe window replays the whole route successfully.
+    assert analysis.selected_departure is not None
+    delayed_plan = find_delayed_plan(
+        plan, vehicle, scene, max_delay=8, delay_step=0.5
+    )[1]
+    assert replay(delayed_plan, vehicle, scene).valid
+    assert delayed_plan.actions[0].type == "wait" or analysis.selected_departure == 0.0
+
+
+def test_departure_window_budget_leaves_unverified_tail_not_safe(base):
+    vehicle, data, plan = base
+    scene = changed_scene(data, EARLY)
+    analysis = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=10.0, step=0.5, max_probes=4,
+    )
+    assert analysis.budget_exhausted is True
+    assert analysis.probes_completed == 4
+    tail = [w for w in analysis.windows if w.kind == "unverified"]
+    assert len(tail) == 1
+    assert tail[0].end_time == 10.0
+
+
+def test_departure_windows_all_safe_when_obstacle_moves_away(base):
+    vehicle, data, plan = base
+    scene = changed_scene(data, AVOID)
+    analysis = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=5.0, step=0.5,
+    )
+    assert all(w.kind == "safe" for w in analysis.windows)
+    assert all(b.feasible for b in analysis.boundaries)
+    assert analysis.selected_departure == 0.0
+
+
+def test_historical_report_is_tagged_never_adopted(base, tmp_path):
+    vehicle, data, plan = base
+    scene_late = changed_scene(data, LATE)
+    analysis = analyze_departure_windows(
+        plan, vehicle, scene_late,
+        earliest_departure=0.0, latest_departure=6.0, step=0.5,
+    )
+    same = attach_historical_windows(
+        analysis,
+        {"departure_windows": {"schedule_signature": scene_late.signature()}},
+    )
+    assert same.historical_status == "same_timetable"
+    other_scene = changed_scene(data, EARLY)
+    stale = attach_historical_windows(
+        analysis,
+        {"departure_windows": {"schedule_signature": other_scene.signature()}},
+    )
+    assert stale.historical_status == "needs_recheck"
+    # Current safe/blocked verdicts come from fresh probes, never from history.
+    assert all(w.kind != "unverified" for w in stale.windows)
+
+
+def test_reopen_includes_selected_window_plan_and_preserves_history(base, cheap_replan, tmp_path):
+    vehicle, data, plan = base
+    scene = changed_scene(data, EARLY)
+    assessment = evaluate_reopen(
+        plan, vehicle, scene, max_delay=10, delay_step=0.5,
+        earliest_departure=0.0, latest_departure=8.0, departure_step=0.5,
+    )
+    windows = assessment.departure_windows
+    selected = windows.selected_departure
+    assert selected is not None
+    selected_plan = assessment.option_plans["selected_window"]
+    assert selected_plan.scene_signature == scene.signature()
+    assert replay(selected_plan, vehicle, scene).valid
+
+    report_path = tmp_path / "report.json"
+    save_reopen_bundle(assessment, None, report_path)
+    assert (tmp_path / "report_selected_window.json").exists()
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert payload["departure_windows"]["selected_verified"] is True
+
+    # Reopen again on a changed arrangement, handing in the previous report:
+    # its windows must be flagged as historical / needing recheck.
+    scene2 = changed_scene(data, LATE)
+    assessment2 = evaluate_reopen(
+        plan, vehicle, scene2, max_delay=10, delay_step=0.5,
+        earliest_departure=0.0, latest_departure=8.0, departure_step=0.5,
+        historical_report=payload,
+    )
+    assert assessment2.departure_windows.historical_status == "needs_recheck"
 
 def test_replanned_option_uses_new_timetable_and_flags_route_vs_timing(base, cheap_replan):
     vehicle, data, plan = base

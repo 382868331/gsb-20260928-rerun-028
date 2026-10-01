@@ -31,14 +31,23 @@ class ReplayReport:
     final_time: float = 0.0
 
 
-def replay(plan: PlanResult, vehicle: Vehicle, scene: Scene, collision_step: float = 0.03) -> ReplayReport:
+def replay(
+    plan: PlanResult,
+    vehicle: Vehicle,
+    scene: Scene,
+    collision_step: float = 0.03,
+    *,
+    enforce_signature: bool = True,
+) -> ReplayReport:
     if not plan.found:
         return ReplayReport(False, 0, math.inf, math.inf, f"plan status is {plan.status}")
     if vehicle.name != plan.vehicle or scene.name != plan.scene:
         return ReplayReport(False, 0, math.inf, math.inf, "plan does not match vehicle/scene names")
 
     if plan.timed:
-        return _replay_timed(plan, vehicle, scene, collision_step)
+        return _replay_timed(
+            plan, vehicle, scene, collision_step, enforce_signature=enforce_signature
+        )
     if scene.dynamic_obstacles:
         return ReplayReport(
             False,
@@ -83,9 +92,9 @@ def _replay_spatial(plan, vehicle, scene, collision_step):
     return ReplayReport(True, checked, xy_error, theta_error, "replayed path is collision-free and reaches the target pose")
 
 
-def _replay_timed(plan, vehicle, scene, collision_step):
+def _replay_timed(plan, vehicle, scene, collision_step, enforce_signature=True):
     expected_signature = scene.signature()
-    if plan.scene_signature != expected_signature:
+    if enforce_signature and plan.scene_signature != expected_signature:
         return ReplayReport(
             False,
             0,
