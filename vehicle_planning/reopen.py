@@ -324,7 +324,12 @@ def evaluate_reopen(
     timetable_changed = original.scene_signature != new_signature
     conflicts = tuple(scan_conflicts(original, vehicle, new_scene))
 
-    original_report = replay(aligned, vehicle, new_scene)
+    # The original route is re-judged independently against the new
+    # timetable: the saved plan copy is re-signed so replay checks actual
+    # collisions instead of rejecting on the signature alone. The original
+    # success file on disk is never touched.
+    rejudged = replace(aligned, scene_signature=new_signature)
+    original_report = replay(rejudged, vehicle, new_scene)
     original_feasible = original_report.valid
 
     options: list[ReopenOption] = [

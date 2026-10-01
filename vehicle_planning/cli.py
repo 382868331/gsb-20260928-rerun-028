@@ -8,6 +8,11 @@ from .motion import standard_primitives
 from .plan import load_plan, save_plan
 from .planner import Planner, PlannerConfig
 from .replay import render_svg, replay
+from .departure import (
+    evaluate_departure_window,
+    save_window_report,
+    select_departure,
+)
 from .reopen import (
     evaluate_reopen,
     save_reopen_bundle,
@@ -56,6 +61,21 @@ def build_parser() -> argparse.ArgumentParser:
     reopen_parser.add_argument("--primitive-length", type=float, nargs="+", default=[0.4, 0.75])
     reopen_parser.add_argument("--cruise-speed", type=float, default=1.2)
     reopen_parser.add_argument("--gear-switch-time", type=float, default=1.5)
+
+    window_parser = sub.add_parser(
+        "window",
+        help="evaluate a range of departure times on the original route",
+    )
+    window_parser.add_argument("--vehicle", required=True)
+    window_parser.add_argument("--scene", required=True, help="current timetable scene file")
+    window_parser.add_argument("--plan", required=True, help="original successful plan (never rewritten)")
+    window_parser.add_argument("--earliest", type=float, required=True, help="earliest departure offset (s)")
+    window_parser.add_argument("--latest", type=float, required=True, help="latest departure offset (s)")
+    window_parser.add_argument("--step", type=float, default=0.5, help="departure sampling step (s)")
+    window_parser.add_argument("--max-checks", type=int, default=200, help="replay budget for departure probes")
+    window_parser.add_argument("--output", required=True, help="window report json path")
+    window_parser.add_argument("--select", type=float, default=None, help="departure offset chosen from a safe interval")
+    window_parser.add_argument("--previous", default=None, help="earlier window report to review against the current timetable")
     return parser
 
 
@@ -150,6 +170,55 @@ def main(argv: list[str] | None = None) -> int:
                 f"delay={option.departure_delay:.2f}s final={option.final_time:.2f}s"
             )
         print(f"recommendation={assessment.recommendation}")
+        return 0
+
+    if args.command == "window":
+        original = load_plan(args.plan)
+        assessment = evaluate_departure_window(
+            original,
+            vehicle,
+            scene,
+            earliest=args.earliest,
+            latest=args.latest,
+            step=args.step,
+            max_checks=args.max_checks,
+        )
+        assessment = replace(assessment, original_plan_path=args.plan)
+        selected = None
+        if args.select is not None:
+            selected_plan = select_departure(assessment, original, vehicle, scene, args.select)
+            selected = (args.select, selected_plan)
+        payload = save_window_report(
+            assessment,
+            args.output,
+            selected=selected,
+            previous_report_path=args.previous,
+            scene=scene,
+        )
+        print(
+            f"window [{assessment.earliest:.2f}, {assessment.latest:.2f}]s "
+            f"step={assessment.step:.2f}s checks={assessment.checks_used}/{assessment.max_checks} "
+            f"budget_exhausted={assessment.budget_exhausted}"
+        )
+        print(
+            f"boundary earliest={assessment.earliest_status} latest={assessment.latest_status}"
+        )
+        for interval in assessment.intervals:
+            names = ",".join(interval.obstacles) or "-"
+            print(
+                f"  {interval.status:12s} {interval.start:7.2f}-{interval.end:7.2f}s "
+                f"obstacles={names} checked={interval.checked_points}"
+            )
+        if selected is not None:
+            print(f"selected departure {args.select:.2f}s verified, plan saved")
+        if payload.get("previous_review"):
+            review = payload["previous_review"]
+            print(f"previous report timetable_changed={review['timetable_changed']}")
+            for interval in review["intervals"]:
+                print(
+                    f"  previous {interval['status']:12s} "
+                    f"{interval['start']:7.2f}-{interval['end']:7.2f}s -> {interval['review']}"
+                )
         return 0
 
     result = load_plan(args.plan)

@@ -1,0 +1,73 @@
+{
+  "schema": "departure_window_v1",
+  "original_plan_path": "outputs/pedestrian_crossing.json",
+  "scene": "pedestrian_crossing",
+  "scene_signature": "4e0226a9784596f1b08017f696bb7b0ef689650949d902fe79849d9fcc3724db",
+  "earliest": 0.0,
+  "latest": 4.0,
+  "step": 1.0,
+  "max_checks": 3,
+  "checks_used": 3,
+  "budget_exhausted": true,
+  "boundary": {
+    "earliest": {
+      "time": 0.0,
+      "status": "safe"
+    },
+    "latest": {
+      "time": 4.0,
+      "status": "safe"
+    }
+  },
+  "intervals": [
+    {
+      "start": 0.0,
+      "end": 1.0,
+      "status": "safe",
+      "obstacles": [],
+      "checked_points": 2
+    },
+    {
+      "start": 2.0,
+      "end": 3.0,
+      "status": "undetermined",
+      "obstacles": [],
+      "checked_points": 0
+    },
+    {
+      "start": 4.0,
+      "end": 4.0,
+      "status": "safe",
+      "obstacles": [],
+      "checked_points": 1
+    }
+  ],
+  "previous_review": {
+    "schema": "departure_window_review_v1",
+    "scene_signature": "4e0226a9784596f1b08017f696bb7b0ef689650949d902fe79849d9fcc3724db",
+    "saved_scene_signature": "5c52083c03777277702146a0fa16a82a20a5e0e773855b26f55c48331f367315",
+    "timetable_changed": true,
+    "intervals": [
+      {
+        "start": 0.0,
+        "end": 1.0,
+        "status": "blocked",
+        "obstacles": [
+          "trolley"
+        ],
+        "checked_points": 3,
+        "review": "needs_recheck",
+        "basis": "historical conclusion under previous timetable 5c52083c0377..."
+      },
+      {
+        "start": 1.5,
+        "end": 8.0,
+        "status": "safe",
+        "obstacles": [],
+        "checked_points": 14,
+        "review": "needs_recheck",
+        "basis": "historical conclusion under previous timetable 5c52083c0377..."
+      }
+    ]
+  }
+}

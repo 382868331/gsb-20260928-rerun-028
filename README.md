@@ -55,11 +55,11 @@ python -m vehicle_planning.cli replay \
 
 ## 障碍时间表变化后重开
 
-方案与场景签名绑定。障碍时间表一旦变化（即使障碍只是移远、原几何路线其实仍走得通），旧方案不能单独“重新验证”，必须以“重开规划问题”的方式处理；原成功方案文件保持不变，失败结果不会覆盖旧的成功记录。
+方案与场景签名绑定。障碍时间表一旦变化，旧的方案文件不能单独“重新验证”（独立回放仍会因签名不一致而失效），必须以“重开规划问题”的方式处理；原成功方案文件保持不变，失败结果不会覆盖旧的成功记录。
 
 `python -m vehicle_planning.cli reopen` 保留原路线并对**新时间表**依次评估三种方案，路线变化与时间安排变化分别标记：
 
-- `original`：原路线、原时间安排直接面对新时间表；给出是否仍可执行，以及逐时刻扫描出的具体冲突区间（起止时刻、持续时长、障碍名称、发生在 drive/换挡/等待哪个阶段）。
+- `original`：原路线、原时间安排独立面对新时间表重新判断（绕过签名拒绝，按实际碰撞核对）；零冲突时与延后零秒的结论一致地判为可行，否则给出逐时刻扫描出的具体冲突区间（起止时刻、持续时长、障碍名称、发生在 drive/换挡/等待哪个阶段）。
 - `delayed`：先只调整出发/等待时间（整体平移时间轴并补一个初始等待动作），路线几何完全不变；找到最小可行延后量即采用。
 - `replanned`：延后也无法避开时，在新时间表上重新搜索几何路径并重新排时，单独标记 `route_changed` 与 `timing_changed`。
 
@@ -72,6 +72,25 @@ python -m vehicle_planning.cli reopen \
 ```
 
 报告会写入 `reopen_assessment_v1` JSON，并在同目录保存各可行方案（如 `report_delayed.json`、`report_replanned.json`）。每个重开方案都带**新时间表**的 `scene_signature`：对新时间表可独立回放成功，对旧时间表仍因签名不一致而失效；原方案只通过路径引用，绝不改写。覆盖障碍提前到达、延迟离开（需延后出发）以及完全避开路线（无几何冲突但仍必须重开）三类情况。
+
+## 出发时间安全区间
+
+不只试一个延后值：给定最早与最晚出发时间（相对原时间表的偏移秒数），`window` 命令在原路线几何不变的前提下，把每个候选出发时刻整体平移后独立回放核对，输出 `departure_window_v1` 报告：
+
+```bash
+python -m vehicle_planning.cli window \
+  --vehicle data/vehicles/compact_car.json \
+  --scene data/scenes/pedestrian_crossing_late.json \
+  --plan outputs/pedestrian_crossing.json \
+  --earliest 0 --latest 8 --step 0.5 \
+  --select 4 \
+  --output outputs/window/report.json
+```
+
+- 相邻同结论的采样点合并为区间：`safe`（逐时刻回放通过）、`blocked`（被具体障碍占用打断，列出障碍名）、`undetermined`（计算预算 `--max-checks` 耗尽，未核对的区间**不会**被写成安全）。
+- 边界出发时刻优先核对，报告中单独给出最早/最晚出发是否可行。
+- `--select` 只能从 `safe` 区间选点；选定后按原路线全过程再核对一次，方案带当前时间表签名保存，原成功记录不改写。
+- 报告记录所基于的 `scene_signature`。更换障碍安排后用 `--previous` 传入旧报告，旧区间会被标记为 `needs_recheck`（旧时间表下的历史结论），与当前时间表下仍然有效的 `current` 结论区分开。
 
 ## 测试
 

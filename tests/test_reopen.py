@@ -79,16 +79,25 @@ def cheap_replan(base, monkeypatch):
     monkeypatch.setattr(reopen_module, "run_full_replan", run_full_replan)
 
 
-def test_changed_timetable_cannot_be_revalidated_even_when_obstacle_moves_away(base, cheap_replan):
+def test_original_route_is_rejudged_independently_when_obstacle_moves_away(base, cheap_replan):
     vehicle, data, plan = base
     for frames in (EARLY_LEAVE, AVOID):
         scene = changed_scene(data, frames)
+        # Standalone replay still rejects the old signature...
         assert replay(plan, vehicle, scene).valid is False
+        # ...but reopen re-judges the original route against the new
+        # timetable on its own merits: zero conflicts means feasible.
         assessment = evaluate_reopen(plan, vehicle, scene, max_delay=0.0)
         assert assessment.timetable_changed is True
-        assert assessment.original_feasible is False
-        assert "re-planned" in assessment.option("original").message
+        assert assessment.original_feasible is True
         assert assessment.conflicts == ()
+        # Consistent with the zero-delay departure option: same route, same
+        # timing, also feasible.
+        delayed = assessment.option("delayed")
+        assert delayed.feasible is True
+        assert delayed.departure_delay == 0.0
+        assert delayed.timing_changed is False
+        assert assessment.recommendation == "original"
 
 
 def test_conflict_intervals_are_reported_without_touching_route(base):
