@@ -77,13 +77,15 @@ python -m vehicle_planning.cli reopen \
 
 给定 `--earliest-departure` 与 `--latest-departure`（单位：相对原计划的延后秒数）后，报告会额外写入 `departure_windows`：两个边界时刻**首先**单独探测（`boundaries` 中给出能否在该边界出发及占用障碍），内部按 `--departure-step` 等间隔探测，相邻同结论探测合并为窗口：
 
-- `safe`：窗口内所有探测的出发时刻沿原路线全程扫描均无冲突，可执行；
+- `safe`：窗口内所有探测的出发时刻沿原路线全程扫描均无冲突，可执行；窗口备注说明它覆盖的边界条件（等间隔采样点与两端边界），单个孤立探测只代表该时刻本身，不外推；
 - `blocked`：被具体障碍占用打断，窗口记录障碍名称；
-- `unverified`：探测预算（`--departure-budget`，默认 300 次）耗尽后未核对的尾部，**不会**被写成安全。
+- `unverified`：探测预算（`--departure-budget`，默认 300 次）耗尽后未核对的尾部、或采样间隔变化留下的间隙，**不会**被写成安全，也不会被写成失败——预算不足只代表证据不够。
 
-分析会从安全区间中选出最小可行出发时刻 `selected_departure`，按原路线生成带新签名的 `report_selected_window.json` 并全程回放核对（`selected_verified`）。
+每个探测是某一出发时刻的点结论（`probes` 完整列出）；窗口恰好铺满整个范围、互不重叠：已核对时刻、有明确依据的连续范围、未核对范围三者严格区分。未被预算覆盖的边界时刻在 `boundaries` 中标记为 `probed=false`、`feasible=null`，不会被当作不可行。零宽范围（起止相同）只探测一次，给出零宽窗口。
 
-保存比较结果后再次更换障碍安排时，可用 `--historical-report` 传入上一份报告：旧时间表下的区间只作为历史结论标注——签名一致为 `same_timetable`（仍需按需复核），签名不同为 `needs_recheck`，当前窗口的安全/占用结论一律来自新时间表的新鲜探测，绝不沿用旧标记。
+分析会从安全区间中选出最小可行出发时刻 `selected_departure`，按原路线生成带新签名的 `report_selected_window.json` 并全程回放核对（`selected_verified`）；`selection` 块记录它采用的场景、场景签名、路线指纹与核对结论，选择前可查看。证据不足时 `selected_departure=null`，不生成可执行方案。
+
+保存比较结果后可用 `--historical-report` 传入上一份报告继续搜索：场景签名与路线指纹都一致时视为**同一轮搜索追加预算**——旧探测原样保留、不重复计数（反复提交同一候选或中断后恢复都不会虚增核对数量），只有新位置消耗本轮预算，`newly_probed` 明确列出这次检查了哪些位置；缩小范围只做过滤，改变采样间隔时旧探测之间的间隙保持 `unverified`，不会由端点通过推出中间通过。签名或路线不一致时旧证据标记为 `needs_recheck`，全部重新探测，新旧场景的结论绝不拼成一段安全区间。
 
 ## 测试
 

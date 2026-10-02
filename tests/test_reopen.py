@@ -192,6 +192,176 @@ def test_departure_window_budget_leaves_unverified_tail_not_safe(base):
     assert tail[0].end_time == 10.0
 
 
+def _assert_partition(analysis):
+    """Windows tile the range exactly once: no overlaps, no gaps."""
+    cursor = analysis.earliest_departure
+    for window in analysis.windows:
+        assert window.start_time == pytest.approx(cursor, abs=1e-6)
+        assert window.end_time >= window.start_time - 1e-9
+        cursor = window.end_time
+    assert cursor == pytest.approx(analysis.latest_departure, abs=1e-6)
+
+
+def test_single_probe_budget_gives_no_contradictory_verdicts(base):
+    vehicle, data, plan = base
+    scene = changed_scene(data, EARLY)
+    analysis = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=10.0, step=0.5, max_probes=1,
+    )
+    assert analysis.budget_exhausted is True
+    assert analysis.probes_completed == 1
+    _assert_partition(analysis)
+    # The probed cell and the unverified tail never overlap ...
+    verified = [w for w in analysis.windows if w.kind != "unverified"]
+    assert len(verified) == 1
+    assert verified[0].start_time == 0.0 and verified[0].end_time == pytest.approx(0.25)
+    tail = [w for w in analysis.windows if w.kind == "unverified"]
+    assert len(tail) == 1 and tail[0].start_time == pytest.approx(0.25)
+    # ... the unreached latest boundary is unknown, not a failure ...
+    labels = {item.label: item for item in analysis.boundaries}
+    assert labels["earliest"].probed is True
+    assert labels["latest"].probed is False
+    assert labels["latest"].feasible is None
+    # ... and no executable departure is selected without evidence.
+    assert analysis.selected_departure is None
+    assert analysis.selected_verified is False
+    assert analysis.to_dict()["selection"] is None
+
+
+def test_budget_topup_continues_search_and_keeps_evidence(base):
+    vehicle, data, plan = base
+    scene = changed_scene(data, EARLY)
+    first = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=8.0, step=0.5, max_probes=4,
+    )
+    assert first.budget_exhausted is True
+    resumed = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=8.0, step=0.5,
+        max_probes=300, prior=first,
+    )
+    assert resumed.continued is True
+    assert resumed.historical_status == "same_timetable"
+    assert resumed.probes_completed == 17
+    assert resumed.probes_this_round == 13
+    # Old evidence is reused verbatim, only new positions consumed budget.
+    old = {p.departure_time: p for p in first.probes}
+    new = {p.departure_time: p for p in resumed.probes}
+    for at_time, probe in old.items():
+        assert new[at_time].feasible == probe.feasible
+    assert set(resumed.newly_probed).isdisjoint(old)
+    assert all(w.kind != "unverified" for w in resumed.windows)
+    _assert_partition(resumed)
+
+
+def test_resubmission_and_restore_do_not_inflate_check_counts(base, tmp_path):
+    vehicle, data, plan = base
+    scene = changed_scene(data, EARLY)
+    first = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=8.0, step=0.5,
+    )
+    # Re-running the same search with the same candidates adds nothing.
+    again = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=8.0, step=0.5,
+        max_probes=300, prior=first,
+    )
+    assert again.probes_this_round == 0
+    assert again.newly_probed == ()
+    assert again.probes_completed == first.probes_completed
+    # A saved-and-restored report continues identically (no phantom checks).
+    payload = json.loads(json.dumps(first.to_dict()))
+    restored = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=8.0, step=0.5,
+        max_probes=300, prior={"departure_windows": payload},
+    )
+    assert restored.probes_this_round == 0
+    assert restored.probes_completed == first.probes_completed
+
+
+def test_changing_step_leaves_intermediate_times_unverified(base):
+    vehicle, data, plan = base
+    scene = changed_scene(data, AVOID)
+    coarse = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=4.0, step=1.0,
+    )
+    assert all(w.kind == "safe" for w in coarse.windows)
+    # Finer step, zero extra budget: probed integer times stay safe, the
+    # half-integer gaps are unverified -- endpoints passing does not imply
+    # the middle passes.
+    refined = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=4.0, step=0.5,
+        max_probes=0, prior=coarse,
+    )
+    assert refined.probes_this_round == 0
+    kinds = [w.kind for w in refined.windows]
+    assert "unverified" in kinds and "safe" in kinds
+    _assert_partition(refined)
+    gaps = [w for w in refined.windows if w.kind == "unverified"]
+    assert any(
+        g.start_time == pytest.approx(0.25) and g.end_time == pytest.approx(0.75)
+        for g in gaps
+    )
+
+
+def test_zero_width_range_probes_single_moment(base):
+    vehicle, data, plan = base
+    scene = changed_scene(data, AVOID)
+    analysis = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=2.0, latest_departure=2.0, step=0.5,
+    )
+    assert analysis.probes_requested == 1
+    assert analysis.probes_completed == 1
+    assert len(analysis.windows) == 1
+    window = analysis.windows[0]
+    assert window.kind == "safe"
+    assert window.start_time == window.end_time == 2.0
+    assert all(b.probed and b.feasible for b in analysis.boundaries)
+    assert analysis.selected_departure == 2.0
+
+
+def test_scene_change_invalidates_prior_evidence(base):
+    vehicle, data, plan = base
+    scene_early = changed_scene(data, EARLY)
+    first = analyze_departure_windows(
+        plan, vehicle, scene_early,
+        earliest_departure=0.0, latest_departure=8.0, step=0.5,
+    )
+    scene_late = changed_scene(data, LATE)
+    resumed = analyze_departure_windows(
+        plan, vehicle, scene_late,
+        earliest_departure=0.0, latest_departure=8.0, step=0.5,
+        max_probes=300, prior=first,
+    )
+    # Old and new timetables are never stitched into one safe interval.
+    assert resumed.historical_status == "needs_recheck"
+    assert resumed.continued is False
+    assert resumed.probes_this_round == resumed.probes_completed
+    assert resumed.schedule_signature == scene_late.signature()
+
+
+def test_selection_records_scene_route_and_verdict(base):
+    vehicle, data, plan = base
+    scene = changed_scene(data, EARLY)
+    analysis = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=8.0, step=0.5,
+    )
+    selection = analysis.to_dict()["selection"]
+    assert selection["departure_time"] == pytest.approx(analysis.selected_departure)
+    assert selection["scene"] == scene.name
+    assert selection["scene_signature"] == scene.signature()
+    assert selection["route_fingerprint"] == analysis.route_fingerprint
+    assert selection["verified"] is True and selection["executable"] is True
+
+
 def test_departure_windows_all_safe_when_obstacle_moves_away(base):
     vehicle, data, plan = base
     scene = changed_scene(data, AVOID)

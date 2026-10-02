@@ -74,7 +74,11 @@ def build_parser() -> argparse.ArgumentParser:
     reopen_parser.add_argument(
         "--historical-report",
         default=None,
-        help="previous reopen report json; its windows are tagged, never adopted as safe",
+        help=(
+            "previous reopen report json; same timetable continues the search with the "
+            "added budget (old probes are reused, never re-counted), a different "
+            "timetable is tagged needs_recheck and never adopted as safe"
+        ),
     )
     return parser
 
@@ -185,9 +189,10 @@ def main(argv: list[str] | None = None) -> int:
                 f"{windows.probes_requested} budget_exhausted={windows.budget_exhausted}"
             )
             for boundary in windows.boundaries:
+                verdict = boundary.feasible if boundary.probed else "unverified"
                 print(
                     f"  {boundary.label:8s} t={boundary.departure_time:6.2f}s "
-                    f"feasible={boundary.feasible} "
+                    f"feasible={verdict} "
                     f"obstacles={','.join(boundary.obstacles) or '-'}"
                 )
             for window in windows.windows:
@@ -198,6 +203,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
             if windows.selected_departure is not None:
                 print(f"selected_departure={windows.selected_departure:.2f}s (fully verified)")
+            else:
+                print("selected_departure=None (undetermined; no executable plan marked)")
+            if windows.newly_probed:
+                probed = ",".join(f"{value:.2f}" for value in windows.newly_probed)
+                print(f"newly_probed={probed}")
             print(f"historical_status={windows.historical_status}")
         print(f"recommendation={assessment.recommendation}")
         return 0
