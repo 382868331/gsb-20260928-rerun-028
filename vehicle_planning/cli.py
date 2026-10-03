@@ -76,6 +76,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="previous reopen report json; its windows are tagged, never adopted as safe",
     )
+    reopen_parser.add_argument(
+        "--continue-report",
+        default=None,
+        help="resume a departure search from a saved report, retaining prior evidence",
+    )
+    reopen_parser.add_argument(
+        "--departure-candidate",
+        type=float,
+        action="append",
+        default=[],
+        help="explicit departure time to check; may be repeated, duplicates are not rechecked",
+    )
     return parser
 
 
@@ -144,6 +156,9 @@ def main(argv: list[str] | None = None) -> int:
         historical = None
         if args.historical_report:
             historical = json.loads(Path(args.historical_report).read_text(encoding="utf-8"))
+        continued = None
+        if args.continue_report:
+            continued = json.loads(Path(args.continue_report).read_text(encoding="utf-8"))
         assessment = evaluate_reopen(
             original,
             vehicle,
@@ -157,6 +172,8 @@ def main(argv: list[str] | None = None) -> int:
             departure_step=args.departure_step,
             departure_budget=args.departure_budget,
             historical_report=historical,
+            continued_report=continued,
+            departure_candidates=tuple(args.departure_candidate),
         )
         assessment = replace(assessment, original_plan_path=args.plan)
         save_reopen_bundle(assessment, None, args.output)
@@ -184,6 +201,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"{windows.latest_departure:.2f}]s probes={windows.probes_completed}/"
                 f"{windows.probes_requested} budget_exhausted={windows.budget_exhausted}"
             )
+            print("newly_checked=" + ",".join(f"{item:.2f}" for item in windows.newly_checked_departures))
+            print(f"selection_status={windows.selection_status}")
             for boundary in windows.boundaries:
                 print(
                     f"  {boundary.label:8s} t={boundary.departure_time:6.2f}s "

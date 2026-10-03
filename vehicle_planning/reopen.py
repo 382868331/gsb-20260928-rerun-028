@@ -15,12 +15,14 @@ final time) are reported independently.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .motion import sample_arc
+from .geometry import polygons_intersect
 from .plan import Action, PlanResult, load_plan, save_plan
 from .replay import replay
 from .scheduler import Scheduler, SchedulerConfig, SchedulerStatus
@@ -220,13 +222,18 @@ def find_delayed_plan(
 
 @dataclass(frozen=True)
 class DepartureWindow:
-    """One classified sub-interval of the user's departure-time range."""
+    """A point or range backed by one clearly identified kind of evidence."""
 
-    kind: str  # "safe" | "blocked" | "unverified"
+    kind: str  # safe | blocked | unverified
     start_time: float
     end_time: float
     obstacles: tuple[str, ...] = ()
     note: str = ""
+    evidence_type: str = "point"  # point | continuous | unproven_range
+    basis: str = ""
+    boundary_conditions: tuple[str, ...] = ()
+    start_inclusive: bool = True
+    end_inclusive: bool = True
 
     def to_dict(self) -> dict:
         payload = {
@@ -237,6 +244,13 @@ class DepartureWindow:
         }
         if self.obstacles:
             payload["obstacles"] = list(self.obstacles)
+        payload["evidence_type"] = self.evidence_type
+        if self.basis:
+            payload["basis"] = self.basis
+        if self.boundary_conditions:
+            payload["boundary_conditions"] = list(self.boundary_conditions)
+        payload["start_inclusive"] = self.start_inclusive
+        payload["end_inclusive"] = self.end_inclusive
         if self.note:
             payload["note"] = self.note
         return payload
@@ -246,7 +260,7 @@ class DepartureWindow:
 class BoundaryProbe:
     label: str
     departure_time: float
-    feasible: bool
+    feasible: bool | None
     obstacles: tuple[str, ...]
 
     def to_dict(self) -> dict:
@@ -255,6 +269,34 @@ class BoundaryProbe:
             "departure_time": round(self.departure_time, 3),
             "feasible": self.feasible,
             "obstacles": list(self.obstacles),
+        }
+
+
+@dataclass(frozen=True)
+class ProbeEvidence:
+    departure_time: float
+    feasible: bool
+    obstacles: tuple[str, ...]
+    check_count: int
+    scene_signature: str
+    route_signature: str
+    replay_samples: int
+    result_message: str
+    first_checked: int
+    last_checked: int
+
+    def to_dict(self) -> dict:
+        return {
+            "departure_time": round(self.departure_time, 9),
+            "feasible": self.feasible,
+            "obstacles": list(self.obstacles),
+            "check_count": self.check_count,
+            "scene_signature": self.scene_signature,
+            "route_signature": self.route_signature,
+            "replay_samples": self.replay_samples,
+            "result_message": self.result_message,
+            "first_checked": self.first_checked,
+            "last_checked": self.last_checked,
         }
 
 
@@ -270,9 +312,18 @@ class DepartureWindowAnalysis:
     budget_exhausted: bool
     boundaries: tuple[BoundaryProbe, ...]
     windows: tuple[DepartureWindow, ...]
-    selected_departure: float | None
-    selected_verified: bool
-    schedule_signature: str
+    checked_probes: tuple[ProbeEvidence, ...] = ()
+    continuous_ranges: tuple[DepartureWindow, ...] = ()
+    newly_checked_departures: tuple[float, ...] = ()
+    selected_departure: float | None = None
+    selected_verified: bool = False
+    selection_status: str = "none"
+    selected_evidence: dict | None = None
+    schedule_signature: str = ""
+    route_signature: str = ""
+    evidence_reuse_status: str = "no_prior"  # no_prior | reused | scene_changed | route_changed
+    stale_evidence_count: int = 0
+    search_state: dict | None = None
     historical_signature: str | None = None
     historical_status: str = "none"  # none | same_timetable | needs_recheck
 
@@ -286,13 +337,22 @@ class DepartureWindowAnalysis:
             "budget_exhausted": self.budget_exhausted,
             "boundaries": [item.to_dict() for item in self.boundaries],
             "windows": [item.to_dict() for item in self.windows],
+            "checked_probes": [item.to_dict() for item in self.checked_probes],
+            "continuous_ranges": [item.to_dict() for item in self.continuous_ranges],
+            "newly_checked_departures": [round(item, 9) for item in self.newly_checked_departures],
             "selected_departure": (
                 round(self.selected_departure, 3)
                 if self.selected_departure is not None
                 else None
             ),
             "selected_verified": self.selected_verified,
+            "selection_status": self.selection_status,
+            "selected_evidence": self.selected_evidence,
             "schedule_signature": self.schedule_signature,
+            "route_signature": self.route_signature,
+            "evidence_reuse_status": self.evidence_reuse_status,
+            "stale_evidence_count": self.stale_evidence_count,
+            "search_state": self.search_state,
             "historical_signature": self.historical_signature,
             "historical_status": self.historical_status,
         }
@@ -303,7 +363,7 @@ def _probe_departure(
     vehicle: Vehicle,
     new_scene: Scene,
     departure: float,
-) -> tuple[bool, tuple[str, ...], PlanResult]:
+) -> tuple[bool, tuple[str, ...], PlanResult, int, str]:
     """Check one departure time over the whole unchanged route on the new timetable.
 
     The candidate carries the new timetable signature and is replayed in the
@@ -322,9 +382,115 @@ def _probe_departure(
         names = tuple(
             sorted({name for item in conflicts for name in item.obstacles})
         )
-        return False, names, candidate
+        return False, names, candidate, sum(item.samples for item in conflicts), "detected concrete conflict interval"
     report = replay(candidate, vehicle, new_scene)
-    return report.valid, (), candidate
+    return report.valid, (), candidate, report.samples, report.message
+
+
+def _route_signature(plan: PlanResult) -> str:
+    payload = {
+        "vehicle": plan.vehicle,
+        "start_pose": plan.start_pose,
+        "goal": plan.goal_pose,
+        "states": plan.states,
+        "motions": [
+            {
+                "direction": motion.direction,
+                "steering": motion.steering,
+                "distance": motion.distance,
+            }
+            for motion in plan.motions
+        ],
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def _route_footprints(plan: PlanResult, vehicle: Vehicle) -> list:
+    pose = plan.start_pose
+    footprints = [vehicle.footprint(*pose)]
+    for action in plan.actions:
+        if not hasattr(action, "distance"):
+            continue
+        if action.type in ("wait", "gear_switch"):
+            continue
+        arc = sample_arc(
+            pose,
+            action.direction,
+            action.steering,
+            action.distance,
+            vehicle.wheelbase,
+            0.03,
+        )
+        footprints.extend(vehicle.footprint(*sampled) for sampled in arc[1:])
+        pose = arc[-1]
+    return footprints
+
+
+def _continuous_safe_range(
+    aligned: PlanResult,
+    vehicle: Vehicle,
+    scene: Scene,
+    earliest: float,
+    latest: float,
+) -> DepartureWindow | None:
+    """Return a range only when a timetable-wide proof is available.
+
+    Discrete departure probes never become ranges. This conservative proof
+    checks static geometry and every dynamic obstacle's held endpoint plus a
+    dense sweep of every keyframe interval against every route footprint.
+    """
+    timed = list(_timed_footprints(aligned, vehicle))
+    for _route_time, footprint, _context in timed:
+        if scene.footprint_collides(footprint):
+            return None
+    if not scene.dynamic_obstacles:
+        return DepartureWindow(
+            kind="safe",
+            start_time=earliest,
+            end_time=latest,
+            note="无动态障碍；静态几何全程核对通过",
+            evidence_type="continuous",
+            basis="static route sweep",
+            boundary_conditions=(
+                f"included lower endpoint {earliest:g}",
+                f"included upper endpoint {latest:g}",
+            ),
+        )
+    for route_time, footprint, _context in timed:
+        window_begin = max(0.0, route_time + earliest)
+        window_end = max(window_begin, route_time + latest)
+        critical = {window_begin, window_end}
+        for obstacle in scene.dynamic_obstacles:
+            key_times = [frame[0] for frame in obstacle.keyframes]
+            critical.update(value for value in key_times if window_begin <= value <= window_end)
+            for left, right in zip(key_times, key_times[1:]):
+                if right < window_begin or left > window_end:
+                    continue
+                begin = max(window_begin, left)
+                end = min(window_end, right)
+                steps = max(1, int(math.ceil((end - begin) / 0.05)))
+                critical.update(begin + (end - begin) * i / steps for i in range(steps + 1))
+            for at_time in critical:
+                if polygons_intersect(footprint, obstacle.polygon_at(at_time)):
+                    return None
+            if polygons_intersect(footprint, obstacle.polygon_at(window_begin)):
+                return None
+            if polygons_intersect(footprint, obstacle.polygon_at(window_end)):
+                return None
+    return DepartureWindow(
+        kind="safe",
+        start_time=earliest,
+        end_time=latest,
+        note="动态障碍在路线时间轴上的保持端点、关键帧端点和关键帧间连续扫掠均不与路线相交",
+        evidence_type="continuous",
+        basis="static replay plus dense obstacle timetable/route sweep",
+        boundary_conditions=(
+            f"included lower endpoint {earliest:g}",
+            f"included upper endpoint {latest:g}",
+            "obstacle keyframe instants included",
+            "obstacle held before first and after last keyframe checked",
+        ),
+    )
 
 
 def analyze_departure_windows(
@@ -336,14 +502,15 @@ def analyze_departure_windows(
     latest_departure: float,
     step: float = 0.2,
     max_probes: int = 300,
+    search_state: dict | None = None,
+    extra_candidates: tuple[float, ...] | None = None,
 ) -> DepartureWindowAnalysis:
     """Classify a departure-time range into safe / blocked / unverified windows.
 
-    The two user-given boundaries are always probed first (boundary departure
-    feasibility is reported explicitly). Interior departure times are probed
-    on a regular grid. Neighbouring probes of one kind merge into a window;
-    if the computation budget runs out the unprobed tail stays "unverified"
-    and is never presented as safe.
+    Probes are exact point evidence. They never imply safety or failure at a
+    neighbouring time, even when the two endpoints of an interval have both
+    been checked. Persisted state deduplicates repeat probes and records the
+    scene/route for which evidence remains applicable.
     """
     if earliest_departure < -1e-9:
         raise ValueError("earliest departure time must be non-negative")
@@ -351,6 +518,8 @@ def analyze_departure_windows(
         raise ValueError("latest departure time must be >= earliest departure time")
     if step <= 0.0:
         raise ValueError("departure step must be positive")
+    if max_probes < 0:
+        raise ValueError("departure budget must be non-negative")
 
     aligned = (
         original
@@ -367,94 +536,191 @@ def analyze_departure_windows(
         grid.append(earliest_departure + index * step)
     if abs(grid[-1] - latest_departure) > 1e-9:
         grid.append(latest_departure)
-    probes_requested = len(grid)
+    requested = {round(value, 9): value for value in grid}
+    for value in extra_candidates or ():
+        if value < earliest_departure - 1e-9 or value > latest_departure + 1e-9:
+            raise ValueError("extra departure candidate must lie inside the search range")
+        requested[round(value, 9)] = float(value)
 
-    results: dict[float, tuple[bool, tuple[str, ...]]] = {}
-    selected_departure: float | None = None
+    route_sig = _route_signature(aligned)
+    previous = search_state or {}
+    inherited: dict[float, ProbeEvidence] = {}
+    stale_count = len(previous.get("probes", ())) if previous else 0
+    evidence_reuse_status = "no_prior" if not previous else "scene_changed"
+    if previous:
+        if previous.get("scene_signature") != new_signature:
+            evidence_reuse_status = "scene_changed"
+        elif previous.get("route_signature") != route_sig:
+            evidence_reuse_status = "route_changed"
+        else:
+            evidence_reuse_status = "reused"
+    if evidence_reuse_status == "reused":
+        for item in previous.get("probes", ()):
+            evidence = ProbeEvidence(
+                departure_time=float(item["departure_time"]),
+                feasible=bool(item["feasible"]),
+                obstacles=tuple(item.get("obstacles", ())),
+                check_count=int(item.get("check_count", 1)),
+                scene_signature=item["scene_signature"],
+                route_signature=item["route_signature"],
+                replay_samples=int(item.get("replay_samples", 0)),
+                result_message=str(item.get("result_message", "")),
+                first_checked=int(item.get("first_checked", 0)),
+                last_checked=int(item.get("last_checked", 0)),
+            )
+            inherited[round(evidence.departure_time, 9)] = evidence
+    all_evidence = dict(inherited)
+    probes = {
+        departure: evidence
+        for departure, evidence in inherited.items()
+        if earliest_departure - 1e-9 <= evidence.departure_time <= latest_departure + 1e-9
+    }
+
+    explicit = {round(value, 9) for value in (extra_candidates or ())}
+    candidates = sorted(explicit) + sorted(set(requested) - explicit)
+    new_checks: list[float] = []
+    turn_offset = int(previous.get("next_check_index", 0))
+    budget_used_this_turn = 0
     budget_exhausted = False
-    completed = 0
-    for departure in grid:
-        if completed >= max_probes:
+    for departure in candidates:
+        if departure in probes:
+            continue
+        if budget_used_this_turn >= max_probes:
             budget_exhausted = True
             break
-        feasible, names, _ = _probe_departure(aligned, vehicle, new_scene, departure)
-        rounded = round(departure, 9)
-        results[rounded] = (feasible, names)
-        completed += 1
-        if feasible and selected_departure is None:
-            selected_departure = rounded
+        feasible, names, _candidate, samples, message = _probe_departure(
+            aligned, vehicle, new_scene, requested[departure]
+        )
+        check_index = turn_offset + budget_used_this_turn + 1
+        probes[departure] = ProbeEvidence(
+            departure_time=requested[departure],
+            feasible=feasible,
+            obstacles=names,
+            check_count=1,
+            scene_signature=new_signature,
+            route_signature=route_sig,
+            replay_samples=samples,
+            result_message=message,
+            first_checked=check_index,
+            last_checked=check_index,
+        )
+        all_evidence[departure] = probes[departure]
+        new_checks.append(departure)
+        budget_used_this_turn += 1
 
+    checked = tuple(probes[key] for key in sorted(probes))
     boundaries = tuple(
         BoundaryProbe(
             label=("earliest" if index == 0 else "latest"),
             departure_time=value,
-            feasible=(results[round(value, 9)][0]
-                      if round(value, 9) in results else False),
-            obstacles=(results.get(round(value, 9), (False, ()))[1]),
+            feasible=(probes[round(value, 9)].feasible if round(value, 9) in probes else None),
+            obstacles=(probes[round(value, 9)].obstacles if round(value, 9) in probes else ()),
         )
         for index, value in enumerate((earliest_departure, latest_departure))
     )
 
+    continuous_range = _continuous_safe_range(
+        aligned, vehicle, new_scene, earliest_departure, latest_departure
+    )
     windows: list[DepartureWindow] = []
-    probed = sorted(results)
-    half = step / 2.0
-    for index, departure in enumerate(probed):
-        feasible, names = results[departure]
-        left = earliest_departure if index == 0 else departure - half
-        right = latest_departure if index == len(probed) - 1 else departure + half
-        if index == 0 and len(probed) > 1:
-            left = departure
-        if index == len(probed) - 1 and len(probed) > 1:
-            right = departure
-        left = max(left, earliest_departure)
-        right = min(right, latest_departure)
-        kind = "safe" if feasible else "blocked"
-        note = "" if feasible else "出发窗口内全程扫描到具体障碍占用"
-        windows.append(
-            DepartureWindow(
-                kind=kind,
-                start_time=left,
-                end_time=right,
-                obstacles=names,
-                note=note,
+    if continuous_range is not None:
+        windows.append(continuous_range)
+    else:
+        sorted_checked = sorted(probes)
+        for departure in sorted_checked:
+            evidence = probes[departure]
+            windows.append(
+                DepartureWindow(
+                    kind="safe" if evidence.feasible else "blocked",
+                    start_time=departure,
+                    end_time=departure,
+                    obstacles=evidence.obstacles,
+                    note=(
+                        "该具体出发时刻已沿当前场景、当前路线全程核对通过"
+                        if evidence.feasible
+                        else "该具体出发时刻核对到具体障碍占用"
+                    ),
+                    evidence_type="point",
+                    basis=f"independent replay/sweep, {evidence.replay_samples} samples",
+                )
             )
-        )
-
-    merged: list[DepartureWindow] = []
-    for window in windows:
-        if merged and merged[-1].kind == window.kind and merged[-1].obstacles == window.obstacles:
-            merged[-1] = DepartureWindow(
-                kind=window.kind,
-                start_time=merged[-1].start_time,
-                end_time=window.end_time,
-                obstacles=window.obstacles,
-                note=window.note,
-            )
+        unchecked: list[tuple[float, float, bool, bool]] = []
+        if not sorted_checked:
+            unchecked.append((earliest_departure, latest_departure, True, True))
         else:
-            merged.append(window)
-
-    if budget_exhausted and probed:
-        merged.append(
-            DepartureWindow(
-                kind="unverified",
-                start_time=probed[-1] + half,
-                end_time=latest_departure,
-                note="计算预算不足，未完成逐出发时刻核对，不能判定为安全",
+            first = sorted_checked[0]
+            last = sorted_checked[-1]
+            if first > earliest_departure + 1e-9:
+                unchecked.append((earliest_departure, first, True, False))
+            for left, right in zip(sorted_checked, sorted_checked[1:]):
+                if right > left + 1e-9:
+                    unchecked.append((left, right, False, False))
+            if last < latest_departure - 1e-9:
+                unchecked.append((last, latest_departure, False, True))
+        for left, right, start_inclusive, end_inclusive in unchecked:
+            windows.append(
+                DepartureWindow(
+                    kind="unverified",
+                    start_time=left,
+                    end_time=right,
+                    note="范围边界或采样点通过不外推到内部；这些时刻尚未独立核对",
+                    evidence_type="unproven_range",
+                    start_inclusive=start_inclusive,
+                    end_inclusive=end_inclusive,
+                )
             )
-        )
+        windows.sort(key=lambda item: (item.start_time, item.end_time, item.kind))
+
+    feasible_points = tuple(item.departure_time for item in checked if item.feasible)
+    selected = feasible_points[0] if feasible_points else None
+    if continuous_range is not None:
+        selected = earliest_departure
+        selection_status = "executable"
+        selected_evidence = {
+            **continuous_range.to_dict(),
+            "departure_time": round(selected, 9),
+            "scene_signature": new_signature,
+            "route_signature": route_sig,
+        }
+    elif selected is not None:
+        selection_status = "executable_at_checked_point"
+        selected_evidence = probes[selected].to_dict()
+    else:
+        selection_status = "provisional"
+        selected_evidence = None
+
+    state = {
+        "schema": "departure_search_state_v1",
+        "scene_signature": new_signature,
+        "route_signature": route_sig,
+        "earliest_departure": earliest_departure,
+        "latest_departure": latest_departure,
+        "step": step,
+        "next_check_index": turn_offset + budget_used_this_turn,
+        "probes": [item.to_dict() for item in (all_evidence[key] for key in sorted(all_evidence))],
+    }
 
     return DepartureWindowAnalysis(
         earliest_departure=earliest_departure,
         latest_departure=latest_departure,
         step=step,
-        probes_requested=probes_requested,
-        probes_completed=completed,
+        probes_requested=len(requested),
+        probes_completed=len([item for item in checked if earliest_departure - 1e-9 <= item.departure_time <= latest_departure + 1e-9]),
         budget_exhausted=budget_exhausted,
         boundaries=boundaries,
-        windows=tuple(merged),
-        selected_departure=selected_departure,
-        selected_verified=selected_departure is not None,
+        windows=tuple(windows),
+        checked_probes=checked,
+        continuous_ranges=((continuous_range,) if continuous_range is not None else ()),
+        newly_checked_departures=tuple(new_checks),
+        selected_departure=selected,
+        selected_verified=continuous_range is not None or selected in probes,
+        selection_status=selection_status,
+        selected_evidence=selected_evidence,
         schedule_signature=new_signature,
+        route_signature=route_sig,
+        evidence_reuse_status=evidence_reuse_status,
+        stale_evidence_count=(0 if evidence_reuse_status == "reused" else stale_count),
+        search_state=state,
     )
 
 
@@ -482,6 +748,17 @@ def attach_historical_windows(
         historical_signature=old_signature,
         historical_status=status,
     )
+
+
+def _departure_state(historical_report: dict | None, continued_report: dict | None) -> dict | None:
+    for report in (continued_report, historical_report):
+        if not report:
+            continue
+        windows = report.get("departure_windows") or {}
+        state = windows.get("search_state")
+        if state:
+            return state
+    return None
 
 
 def run_full_replan(
@@ -583,6 +860,8 @@ def evaluate_reopen(
     departure_step: float = 0.2,
     departure_budget: int = 300,
     historical_report: dict | None = None,
+    continued_report: dict | None = None,
+    departure_candidates: tuple[float, ...] = (),
 ) -> ReopenAssessment:
     """Reopen a successful plan against a changed obstacle timetable.
 
@@ -701,18 +980,27 @@ def evaluate_reopen(
             latest_departure=latest_departure,
             step=departure_step,
             max_probes=departure_budget,
+            search_state=_departure_state(historical_report, continued_report),
+            extra_candidates=tuple(departure_candidates),
         )
         departure_analysis = attach_historical_windows(
-            departure_analysis, historical_report
+            departure_analysis, continued_report or historical_report
         )
 
     selected_plan = None
-    if departure_analysis is not None and departure_analysis.selected_departure is not None:
-        _, _, selected_plan = _probe_departure(
+    if (
+        departure_analysis is not None
+        and departure_analysis.selected_departure is not None
+        and departure_analysis.selection_status != "provisional"
+    ):
+        selected_plan = replace(
             aligned,
-            vehicle,
-            new_scene,
-            departure_analysis.selected_departure,
+            actions=_shift_actions(
+                aligned.actions,
+                departure_analysis.selected_departure,
+                f"采用已核对的出发时刻 {departure_analysis.selected_departure:.1f}s（路线不变）",
+            ),
+            scene_signature=new_signature,
         )
 
     return ReopenAssessment(

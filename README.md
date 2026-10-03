@@ -75,13 +75,17 @@ python -m vehicle_planning.cli reopen \
 
 ### 出发时间安全区间
 
-给定 `--earliest-departure` 与 `--latest-departure`（单位：相对原计划的延后秒数）后，报告会额外写入 `departure_windows`：两个边界时刻**首先**单独探测（`boundaries` 中给出能否在该边界出发及占用障碍），内部按 `--departure-step` 等间隔探测，相邻同结论探测合并为窗口：
+给定 `--earliest-departure` 与 `--latest-departure`（单位：相对原计划的延后秒数）后，报告会额外写入 `departure_windows`。边界和采样时刻是零宽的具体核对点：`checked_probes` 保存实际结论、核对采样数、场景签名、路线签名和核对编号；点与点之间写入开区间或半开区间形式的 `unverified`。预算耗尽只意味着证据不足，不会产生安全区间，也不会把未检查的最晚边界判成失败，未核对边界显示为 `feasible: null`。
 
-- `safe`：窗口内所有探测的出发时刻沿原路线全程扫描均无冲突，可执行；
-- `blocked`：被具体障碍占用打断，窗口记录障碍名称；
-- `unverified`：探测预算（`--departure-budget`，默认 300 次）耗尽后未核对的尾部，**不会**被写成安全。
+- `safe`（`evidence_type: point`）：仅该具体出发时刻沿当前路线全程扫描无冲突，可在该时刻执行；
+- `blocked`（`evidence_type: point`）：仅该具体出发时刻被具体障碍占用，记录障碍名称；
+- `unverified`：尚未核对的开区间或半开区间，不会被写成安全或失败。
 
-分析会从安全区间中选出最小可行出发时刻 `selected_departure`，按原路线生成带新签名的 `report_selected_window.json` 并全程回放核对（`selected_verified`）。
+只有存在独立、明确的连续依据时才输出 `evidence_type: continuous` 的 `safe` 区间；报告会列出 `basis` 与 `boundary_conditions`，说明上下界、障碍关键帧出现/消失时刻以及保持段是否已经包含。仅核对两个端点或若干采样点不会推出中间时刻可行。零宽时间范围会得到一个零宽点证据；端点相接的占用区间按同一套闭/开边界语义处理。
+
+分析只会从已核对可行点或有连续依据的区间选择 `selected_departure`，并在 `selected_evidence` 中给出采用的场景、路线和实际核对结论；`selection_status` 为 `provisional` 时允许保存方案，但不会生成可执行的 `report_selected_window.json`。
+
+预算不足后可用 `--continue-report` 传入上一份报告继续同一轮搜索。`newly_checked_departures` 只列本轮新核对的位置；重复提交同一候选不会增加 `check_count` 或伪造新的独立核对。也可用 `--departure-candidate 3.2` 直接检查两个已核对点之间的新位置。缩小范围或改变采样间隔会保留同场景、同路线的旧证据；场景或路线版本变化时，旧证据标记为 `scene_changed` 或 `route_changed` 并隔离，绝不与新场景的结果拼接。
 
 保存比较结果后再次更换障碍安排时，可用 `--historical-report` 传入上一份报告：旧时间表下的区间只作为历史结论标注——签名一致为 `same_timetable`（仍需按需复核），签名不同为 `needs_recheck`，当前窗口的安全/占用结论一律来自新时间表的新鲜探测，绝不沿用旧标记。
 
