@@ -209,6 +209,11 @@ def main(argv: list[str] | None = None) -> int:
                 probed = ",".join(f"{value:.2f}" for value in windows.newly_probed)
                 print(f"newly_probed={probed}")
             print(f"historical_status={windows.historical_status}")
+            if windows.prior_selection_status != "none":
+                print(
+                    f"prior_selection={windows.prior_selection_status}: "
+                    f"{windows.prior_selection_note}"
+                )
         print(f"recommendation={assessment.recommendation}")
         return 0
 

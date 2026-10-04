@@ -38,6 +38,16 @@ LATE = [[0.0, 11.0, 4.5, 0.0], [6.0, 11.0, 4.5, 0.0], [12.0, -15.0, 4.5, 0.0]]
 EARLY_LEAVE = [[0.0, -8.0, 4.5, 0.0], [3.0, -2.0, 4.5, 0.0], [6.0, -15.0, 4.5, 0.0]]
 # Obstacle timetable stays far away from the route at all times.
 AVOID = [[0.0, -15.0, 9.5, 0.0], [10.0, -15.0, 9.5, 0.0], [20.0, -25.0, 9.5, 0.0]]
+# Obstacle briefly blocks the corridor around t=19.5-21.0s, so only middle
+# departure shifts (~1-5.5s) collide; both range endpoints are feasible.
+MIDDLE = [
+    [0.0, -30.0, 6.0, 0.0],
+    [19.4, -30.0, 6.0, 0.0],
+    [19.5, 6.9, 6.0, 0.0],
+    [21.0, 6.9, 6.0, 0.0],
+    [21.1, -30.0, 6.0, 0.0],
+    [30.0, -30.0, 6.0, 0.0],
+]
 
 
 @pytest.fixture(scope="module")
@@ -212,12 +222,14 @@ def test_single_probe_budget_gives_no_contradictory_verdicts(base):
     assert analysis.budget_exhausted is True
     assert analysis.probes_completed == 1
     _assert_partition(analysis)
-    # The probed cell and the unverified tail never overlap ...
+    # The lone probed point and the unverified tail never overlap: a single
+    # probe stands for its own moment only, not a half-step cell.
     verified = [w for w in analysis.windows if w.kind != "unverified"]
     assert len(verified) == 1
-    assert verified[0].start_time == 0.0 and verified[0].end_time == pytest.approx(0.25)
+    assert verified[0].start_time == 0.0 and verified[0].end_time == pytest.approx(0.0)
     tail = [w for w in analysis.windows if w.kind == "unverified"]
-    assert len(tail) == 1 and tail[0].start_time == pytest.approx(0.25)
+    assert len(tail) == 1 and tail[0].start_time == pytest.approx(0.0)
+    assert tail[0].end_time == pytest.approx(10.0)
     # ... the unreached latest boundary is unknown, not a failure ...
     labels = {item.label: item for item in analysis.boundaries}
     assert labels["earliest"].probed is True
@@ -304,10 +316,14 @@ def test_changing_step_leaves_intermediate_times_unverified(base):
     assert "unverified" in kinds and "safe" in kinds
     _assert_partition(refined)
     gaps = [w for w in refined.windows if w.kind == "unverified"]
+    # Each integer probe is an isolated point verdict; everything between
+    # the integers is unknown, not split at midpoints.
     assert any(
-        g.start_time == pytest.approx(0.25) and g.end_time == pytest.approx(0.75)
+        g.start_time == pytest.approx(0.0) and g.end_time == pytest.approx(1.0)
         for g in gaps
     )
+    points = [w for w in refined.windows if w.kind == "safe"]
+    assert all(w.start_time == pytest.approx(w.end_time) for w in points)
 
 
 def test_zero_width_range_probes_single_moment(base):
@@ -325,6 +341,130 @@ def test_zero_width_range_probes_single_moment(base):
     assert window.start_time == window.end_time == 2.0
     assert all(b.probed and b.feasible for b in analysis.boundaries)
     assert analysis.selected_departure == 2.0
+
+
+def test_endpoints_only_budget_leaves_middle_unknown(base):
+    vehicle, data, plan = base
+    scene = changed_scene(data, EARLY)
+    analysis = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=8.0, step=0.5, max_probes=2,
+    )
+    assert analysis.probes_completed == 2
+    assert analysis.budget_exhausted is True
+    _assert_partition(analysis)
+    # Only the two endpoint moments carry verdicts; the whole interior is
+    # unknown -- never split at the midpoint into blocked/safe halves.
+    verified = [w for w in analysis.windows if w.kind != "unverified"]
+    assert len(verified) == 2
+    assert all(w.start_time == pytest.approx(w.end_time) for w in verified)
+    assert verified[0].start_time == 0.0 and verified[0].kind == "blocked"
+    assert verified[1].start_time == 8.0 and verified[1].kind == "safe"
+    middle = [w for w in analysis.windows if w.kind == "unverified"]
+    assert len(middle) == 1
+    assert middle[0].start_time == pytest.approx(0.0)
+    assert middle[0].end_time == pytest.approx(8.0)
+    # The probed feasible endpoint is still a valid, verified selection.
+    assert analysis.selected_departure == 8.0
+
+
+def test_narrow_middle_conflict_not_hidden_by_sparse_probes(base):
+    vehicle, data, plan = base
+    scene = changed_scene(data, MIDDLE)
+    sparse = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=8.0, step=0.5, max_probes=2,
+    )
+    # Both endpoints probe safe, yet the middle must stay unknown: endpoint
+    # evidence never promotes the unprobed interior to safe.
+    labels = {item.label: item for item in sparse.boundaries}
+    assert labels["earliest"].feasible is True
+    assert labels["latest"].feasible is True
+    middle = [w for w in sparse.windows if w.kind == "unverified"]
+    assert len(middle) == 1
+    assert middle[0].start_time == pytest.approx(0.0)
+    assert middle[0].end_time == pytest.approx(8.0)
+    assert all(w.kind != "safe" or w.start_time == w.end_time for w in sparse.windows)
+    # ... and topping up the budget resolves exactly the previously
+    # unknown middle, exposing the narrow blocked window hiding there.
+    resumed = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=8.0, step=0.5,
+        max_probes=300, prior=sparse,
+    )
+    assert resumed.probes_this_round == 15
+    assert all(w.kind != "unverified" for w in resumed.windows)
+    blocked = [w for w in resumed.windows if w.kind == "blocked"]
+    assert blocked and all(w.obstacles for w in blocked)
+    assert any(w.start_time > 0.0 and w.end_time < 8.0 for w in blocked)
+
+
+def test_non_integer_start_and_step_resume_without_double_counting(base):
+    vehicle, data, plan = base
+    scene = changed_scene(data, AVOID)
+    first = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.3, latest_departure=7.8, step=0.7, max_probes=3,
+    )
+    assert first.probes_completed == 3
+    assert first.budget_exhausted is True
+    resumed = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.3, latest_departure=7.8, step=0.7,
+        max_probes=300, prior=first,
+    )
+    assert resumed.probes_completed == resumed.probes_requested
+    assert resumed.probes_this_round == resumed.probes_requested - 3
+    assert set(resumed.newly_probed).isdisjoint(p.departure_time for p in first.probes)
+    # Re-submitting the restored result costs nothing more.
+    again = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.3, latest_departure=7.8, step=0.7,
+        max_probes=300, prior=resumed.to_dict(),
+    )
+    assert again.probes_this_round == 0
+    assert again.probes_completed == resumed.probes_completed
+
+
+def test_prior_selection_invalidation_is_explicit(base):
+    vehicle, data, plan = base
+    scene = changed_scene(data, AVOID)
+    first = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=5.0, step=0.5,
+    )
+    assert first.selected_departure == 0.0
+
+    # Same timetable, selection still verified: explicitly kept.
+    kept = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=5.0, step=0.5,
+        max_probes=300, prior=first,
+    )
+    assert kept.prior_selected_departure == 0.0
+    assert kept.prior_selection_status == "kept"
+
+    # Same timetable but the old selection falls outside the checked set:
+    # explicitly invalidated, never silently dropped.
+    narrowed = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=2.0, latest_departure=5.0, step=0.5,
+        max_probes=300, prior=first,
+    )
+    assert narrowed.prior_selected_departure == 0.0
+    assert narrowed.prior_selection_status == "invalidated"
+    assert narrowed.prior_selection_note
+
+    # Changed timetable: old selection lapses with the rest of the evidence.
+    other = changed_scene(data, LATE)
+    rechecked = analyze_departure_windows(
+        plan, vehicle, other,
+        earliest_departure=0.0, latest_departure=5.0, step=0.5,
+        max_probes=300, prior=first,
+    )
+    assert rechecked.historical_status == "needs_recheck"
+    assert rechecked.prior_selection_status == "invalidated"
+    assert str(rechecked.prior_selected_departure) in rechecked.prior_selection_note
 
 
 def test_scene_change_invalidates_prior_evidence(base):

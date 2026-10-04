@@ -329,6 +329,9 @@ class DepartureWindowAnalysis:
     continued: bool = False
     historical_signature: str | None = None
     historical_status: str = "none"  # none | same_timetable | needs_recheck
+    prior_selected_departure: float | None = None
+    prior_selection_status: str = "none"  # none | kept | invalidated
+    prior_selection_note: str = ""
 
     def to_dict(self) -> dict:
         selection = None
@@ -366,6 +369,13 @@ class DepartureWindowAnalysis:
             "route_fingerprint": self.route_fingerprint,
             "historical_signature": self.historical_signature,
             "historical_status": self.historical_status,
+            "prior_selected_departure": (
+                round(self.prior_selected_departure, 3)
+                if self.prior_selected_departure is not None
+                else None
+            ),
+            "prior_selection_status": self.prior_selection_status,
+            "prior_selection_note": self.prior_selection_note,
         }
 
 
@@ -412,11 +422,20 @@ def analyze_departure_windows(
     """Classify a departure-time range into safe / blocked / unverified windows.
 
     Evidence model: each probe is a point verdict for exactly one departure
-    time. A safe/blocked window only covers the half-step cells of the
-    probes backing it; anything never probed (budget tail, gaps left by a
-    changed sampling step, range edges) is reported as unverified and is
-    never promoted to safe or failure. Boundary probes that were not reached
-    are reported as unprobed, never as infeasible.
+    time. Three evidence levels are reported strictly separately:
+
+    * probed points: a lone probe stands for its own moment only (a
+      zero-width window) and is never extrapolated;
+    * continuous intervals: only adjacent probes no more than one step
+      apart share a cell boundary at their midpoint, so a continuous
+      safe/blocked span always rests on dense point evidence;
+    * unknown ranges: anything never probed (budget tail, gaps between
+      probes farther apart than the step, gaps left by a changed sampling
+      step, range edges) is reported as unverified and is never promoted
+      to safe or failure by midpoint splitting alone.
+
+    Boundary probes that were not reached are reported as unprobed, never
+    as infeasible.
 
     The prior argument (a previous analysis object or a saved report dict)
     continues the same search with extra budget: its probes are reused
@@ -447,12 +466,18 @@ def analyze_departure_windows(
     historical_status = "none"
     continued = False
     evidence: dict[float, DepartureProbe] = {}
+    prior_selected: float | None = None
     if prior is not None:
         prior_payload = (
             prior.to_dict() if isinstance(prior, DepartureWindowAnalysis) else prior
         )
         if "departure_windows" in prior_payload and "probes" not in prior_payload:
             prior_payload = prior_payload.get("departure_windows") or {}
+        raw_selected = prior_payload.get("selected_departure")
+        if raw_selected is None:
+            raw_selected = (prior_payload.get("selection") or {}).get("departure_time")
+        if raw_selected is not None:
+            prior_selected = float(raw_selected)
         historical_signature = prior_payload.get("schedule_signature")
         prior_route = prior_payload.get("route_fingerprint")
         if historical_signature == new_signature and prior_route in (None, "", fingerprint):
@@ -472,14 +497,14 @@ def analyze_departure_windows(
         else:
             historical_status = "needs_recheck"
 
-    grid = [earliest_departure]
     interior_count = max(
         0, int(math.floor((latest_departure - earliest_departure) / step + 1e-9)) - 1
     )
-    for index in range(1, interior_count + 1):
-        grid.append(earliest_departure + index * step)
-    if abs(grid[-1] - latest_departure) > 1e-9:
-        grid.append(latest_departure)
+    interior = [earliest_departure + index * step for index in range(1, interior_count + 1)]
+    # Boundary moments are probed FIRST, then the interior in order: a tiny
+    # budget still characterizes both edges and leaves the middle unknown
+    # instead of silently spending everything on one end of the range.
+    grid = [earliest_departure, latest_departure, *interior]
     # Zero-width ranges and duplicate grid points are probed once, never twice.
     grid = list(dict.fromkeys(round(value, 9) for value in grid))
     probes_requested = len(grid)
@@ -510,7 +535,6 @@ def analyze_departure_windows(
     )
 
     ordered = [evidence[key] for key in sorted(evidence)]
-    half = step / 2.0
     windows: list[DepartureWindow] = []
     cursor = earliest_departure
 
@@ -525,23 +549,30 @@ def analyze_departure_windows(
                 )
             )
 
-    # Each probe owns a half-step cell; consecutive probes split at the
-    # midpoint. Anything not covered by a cell stays unverified, so windows
-    # partition the range without overlaps or contradictions.
+    # Each probe is a point verdict. Its cell only extends to a neighbour
+    # probed at most one step away (boundary at their midpoint); a probe
+    # with no such neighbour keeps a zero-width cell at its own moment.
+    # Anything not covered by a cell stays unverified, so windows partition
+    # the range without overlaps or contradictions, and distant probes
+    # never get their midpoint treated as proven territory.
+    cells: list[tuple[float, float]] = []
     for index, probe in enumerate(ordered):
         at_time = probe.departure_time
-        left = at_time - half
-        right = at_time + half
-        if index == 0 and abs(at_time - earliest_departure) <= 1e-9:
-            left = earliest_departure
-        if index == len(ordered) - 1 and abs(at_time - latest_departure) <= 1e-9:
-            right = latest_departure
+        left = at_time
+        right = at_time
         if index > 0:
-            left = max(left, (ordered[index - 1].departure_time + at_time) / 2.0)
+            previous_time = ordered[index - 1].departure_time
+            if at_time - previous_time <= step + 1e-9:
+                left = (previous_time + at_time) / 2.0
         if index < len(ordered) - 1:
-            right = min(right, (at_time + ordered[index + 1].departure_time) / 2.0)
+            next_time = ordered[index + 1].departure_time
+            if next_time - at_time <= step + 1e-9:
+                right = (at_time + next_time) / 2.0
         left = min(max(left, earliest_departure), latest_departure)
         right = min(max(right, earliest_departure), latest_departure)
+        cells.append((left, right))
+
+    for probe, (left, right) in zip(ordered, cells):
         if left > cursor + 1e-9:
             emit_unverified(cursor, left)
         left = max(left, cursor)
@@ -572,23 +603,63 @@ def analyze_departure_windows(
     # a lone probe never implies its unchecked neighbours.
     annotated: list[DepartureWindow] = []
     for window in windows:
-        if window.kind == "safe":
+        if window.kind in ("safe", "blocked"):
+            verdict = "可行" if window.kind == "safe" else "冲突"
             if window.probes > 1:
                 note = (
-                    f"连续可行区间：覆盖 [{window.start_time:.3f}, {window.end_time:.3f}]s 内"
-                    f"步长 {step}s 的 {window.probes} 个已核对采样点（含两端边界）；"
-                    "边界条件为等间隔采样点逐一全程无冲突"
+                    f"连续{verdict}区间：覆盖 [{window.start_time:.3f}, {window.end_time:.3f}]s 内"
+                    f"步长不超过 {step}s 的 {window.probes} 个已核对采样点（含两端边界）；"
+                    "边界条件为相邻采样点逐一全程扫描结论一致"
+                )
+            elif window.end_time - window.start_time <= 1e-9:
+                note = (
+                    f"已测点：仅出发时刻 {window.start_time:.3f}s 本身已核对（{verdict}），"
+                    "两侧未核对范围保持未知，不外推"
                 )
             else:
-                note = "仅该出发时刻（±半步长单元）已核对，不外推至未核对的邻近时刻"
+                note = (
+                    f"已测点：出发时刻已核对（{verdict}）；单元边界为与相邻已探测点"
+                    "（间距不超过步长）的中点，不代表未探测的更细时刻"
+                )
+            if window.kind == "blocked":
+                note += "；全程扫描到具体障碍占用"
             window = replace(window, note=note)
-        elif window.kind == "blocked":
-            window = replace(window, note="出发窗口内全程扫描到具体障碍占用")
         annotated.append(window)
 
     selected_departure = next(
         (probe.departure_time for probe in ordered if probe.feasible), None
     )
+
+    # A previous round's selected departure is never silently carried over:
+    # the report states explicitly whether it still holds or lapsed.
+    prior_selection_status = "none"
+    prior_selection_note = ""
+    if prior_selected is not None:
+        if historical_status == "needs_recheck":
+            prior_selection_status = "invalidated"
+            prior_selection_note = (
+                f"旧选择 {prior_selected:.3f}s 失效：场景签名或路线指纹已变化，"
+                "旧证据全部重新核对，旧选择未沿用"
+            )
+        else:
+            old_probe = evidence.get(round(prior_selected, 9))
+            if old_probe is not None and old_probe.feasible:
+                prior_selection_status = "kept"
+                prior_selection_note = (
+                    f"旧选择 {prior_selected:.3f}s 仍然有效：该时刻在当前证据中"
+                    "已核对可行"
+                )
+            elif old_probe is not None:
+                prior_selection_status = "invalidated"
+                prior_selection_note = (
+                    f"旧选择 {prior_selected:.3f}s 失效：当前证据表明该时刻存在冲突"
+                )
+            else:
+                prior_selection_status = "invalidated"
+                prior_selection_note = (
+                    f"旧选择 {prior_selected:.3f}s 失效：该时刻不在当前已核对集合内"
+                    "（范围缩小或采样网格变化），无法确认，未沿用"
+                )
 
     return DepartureWindowAnalysis(
         earliest_departure=earliest_departure,
@@ -610,6 +681,9 @@ def analyze_departure_windows(
         route_fingerprint=fingerprint,
         historical_signature=historical_signature,
         historical_status=historical_status,
+        prior_selected_departure=prior_selected,
+        prior_selection_status=prior_selection_status,
+        prior_selection_note=prior_selection_note,
     )
 
 
