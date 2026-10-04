@@ -72,6 +72,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="max number of departure probes; unprobed tail is marked unverified",
     )
     reopen_parser.add_argument(
+        "--departure-proof-step",
+        type=float,
+        default=None,
+        help=(
+            "departure-axis sweep resolution needed to certify a continuous "
+            "safe/blocked span; adjacent probes alone never certify an interval"
+        ),
+    )
+    reopen_parser.add_argument(
         "--historical-report",
         default=None,
         help=(
@@ -160,6 +169,7 @@ def main(argv: list[str] | None = None) -> int:
             latest_departure=args.latest_departure,
             departure_step=args.departure_step,
             departure_budget=args.departure_budget,
+            departure_proof_step=args.departure_proof_step,
             historical_report=historical,
         )
         assessment = replace(assessment, original_plan_path=args.plan)

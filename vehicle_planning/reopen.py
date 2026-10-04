@@ -247,13 +247,20 @@ class DepartureWindow:
     obstacles: tuple[str, ...] = ()
     note: str = ""
     probes: int = 0
+    # "point": evidence for exactly one departure time (zero width);
+    # "swept": continuous span backed by a dense departure-axis sweep at
+    # the declared proof resolution (extra proof, never a midpoint split
+    # between two neighbouring probes);
+    # "none": unverified range, neither safe nor failed.
+    evidence_type: str = "point"
 
     def to_dict(self) -> dict:
         payload = {
             "kind": self.kind,
-            "start_time": round(self.start_time, 3),
-            "end_time": round(self.end_time, 3),
-            "duration": round(self.end_time - self.start_time, 3),
+            "evidence_type": self.evidence_type,
+            "start_time": round(self.start_time, 9),
+            "end_time": round(self.end_time, 9),
+            "duration": round(self.end_time - self.start_time, 9),
         }
         if self.probes:
             payload["probes"] = self.probes
@@ -271,20 +278,36 @@ class DepartureProbe:
     departure_time: float
     feasible: bool
     obstacles: tuple[str, ...] = ()
+    # None for a requested grid point; otherwise the [left, right] grid gap
+    # this interior sample was produced to certify. Gap-tagged samples stay
+    # point evidence forever, but can only certify that exact gap -- a later
+    # analysis with a different sampling step must not borrow them silently.
+    gap_tag: tuple[float, float] | None = None
 
     def to_dict(self) -> dict:
-        return {
-            "departure_time": round(self.departure_time, 3),
+        payload = {
+            "departure_time": round(self.departure_time, 9),
             "feasible": self.feasible,
             "obstacles": list(self.obstacles),
+            "provenance": (
+                "grid"
+                if self.gap_tag is None
+                else ["gap", round(self.gap_tag[0], 9), round(self.gap_tag[1], 9)]
+            ),
         }
+        return payload
 
     @staticmethod
     def from_dict(payload: dict) -> "DepartureProbe":
+        provenance = payload.get("provenance", "grid")
+        gap_tag = None
+        if isinstance(provenance, list) and provenance[:1] == ["gap"]:
+            gap_tag = (float(provenance[1]), float(provenance[2]))
         return DepartureProbe(
             departure_time=float(payload["departure_time"]),
             feasible=bool(payload["feasible"]),
             obstacles=tuple(str(name) for name in payload.get("obstacles", ())),
+            gap_tag=gap_tag,
         )
 
 
@@ -299,7 +322,7 @@ class BoundaryProbe:
     def to_dict(self) -> dict:
         return {
             "label": self.label,
-            "departure_time": round(self.departure_time, 3),
+            "departure_time": round(self.departure_time, 9),
             "feasible": self.feasible,
             "probed": self.probed,
             "obstacles": list(self.obstacles),
@@ -313,6 +336,7 @@ class DepartureWindowAnalysis:
     earliest_departure: float
     latest_departure: float
     step: float
+    proof_resolution: float
     probes_requested: int
     probes_completed: int
     budget_exhausted: bool
@@ -329,12 +353,14 @@ class DepartureWindowAnalysis:
     continued: bool = False
     historical_signature: str | None = None
     historical_status: str = "none"  # none | same_timetable | needs_recheck
+    prior_selected_departure: float | None = None
+    prior_selection_status: str = "none"  # none | still_verified | invalidated | stale_context
 
     def to_dict(self) -> dict:
         selection = None
         if self.selected_departure is not None:
             selection = {
-                "departure_time": round(self.selected_departure, 3),
+                "departure_time": round(self.selected_departure, 9),
                 "scene": self.scene_name,
                 "scene_signature": self.schedule_signature,
                 "route_fingerprint": self.route_fingerprint,
@@ -342,20 +368,21 @@ class DepartureWindowAnalysis:
                 "executable": True,
             }
         return {
-            "earliest_departure": round(self.earliest_departure, 3),
-            "latest_departure": round(self.latest_departure, 3),
-            "step": round(self.step, 3),
+            "earliest_departure": round(self.earliest_departure, 9),
+            "latest_departure": round(self.latest_departure, 9),
+            "step": round(self.step, 9),
+            "proof_resolution": round(self.proof_resolution, 9),
             "probes_requested": self.probes_requested,
             "probes_completed": self.probes_completed,
             "probes_this_round": self.probes_this_round,
-            "newly_probed": [round(value, 3) for value in self.newly_probed],
+            "newly_probed": [round(value, 9) for value in self.newly_probed],
             "continued": self.continued,
             "budget_exhausted": self.budget_exhausted,
             "boundaries": [item.to_dict() for item in self.boundaries],
             "windows": [item.to_dict() for item in self.windows],
             "probes": [item.to_dict() for item in self.probes],
             "selected_departure": (
-                round(self.selected_departure, 3)
+                round(self.selected_departure, 9)
                 if self.selected_departure is not None
                 else None
             ),
@@ -366,6 +393,12 @@ class DepartureWindowAnalysis:
             "route_fingerprint": self.route_fingerprint,
             "historical_signature": self.historical_signature,
             "historical_status": self.historical_status,
+            "prior_selected_departure": (
+                round(self.prior_selected_departure, 9)
+                if self.prior_selected_departure is not None
+                else None
+            ),
+            "prior_selection_status": self.prior_selection_status,
         }
 
 
@@ -389,13 +422,20 @@ def _probe_departure(
     )
     candidate = replace(aligned, actions=actions, scene_signature=new_signature)
     conflicts = scan_conflicts(candidate, vehicle, new_scene)
+    if not conflicts:
+        report = replay(candidate, vehicle, new_scene)
+        names = tuple(
+            obstacle.name
+            for obstacle in new_scene.dynamic_obstacles
+            if obstacle.name in report.message
+        )
+        return report.valid, names, candidate
     if conflicts:
         names = tuple(
             sorted({name for item in conflicts for name in item.obstacles})
         )
         return False, names, candidate
-    report = replay(candidate, vehicle, new_scene)
-    return report.valid, (), candidate
+    return True, (), candidate
 
 
 def analyze_departure_windows(
@@ -407,16 +447,17 @@ def analyze_departure_windows(
     latest_departure: float,
     step: float = 0.2,
     max_probes: int = 300,
+    proof_step: float | None = None,
     prior: "DepartureWindowAnalysis | dict | None" = None,
 ) -> DepartureWindowAnalysis:
     """Classify a departure-time range into safe / blocked / unverified windows.
 
-    Evidence model: each probe is a point verdict for exactly one departure
-    time. A safe/blocked window only covers the half-step cells of the
-    probes backing it; anything never probed (budget tail, gaps left by a
-    changed sampling step, range edges) is reported as unverified and is
-    never promoted to safe or failure. Boundary probes that were not reached
-    are reported as unprobed, never as infeasible.
+    Evidence model: a probe is evidence for exactly one departure time and is
+    reported as a zero-width point. A positive-width safe/blocked window needs
+    extra proof: a dense sweep over that gap at proof_step resolution. All
+    other ranges stay unverified; two neighbouring probes never own a midpoint
+    cell, and passing endpoints never proves the middle. Boundary probes that
+    were not reached are unprobed, never infeasible.
 
     The prior argument (a previous analysis object or a saved report dict)
     continues the same search with extra budget: its probes are reused
@@ -434,6 +475,10 @@ def analyze_departure_windows(
         raise ValueError("latest departure time must be >= earliest departure time")
     if step <= 0.0:
         raise ValueError("departure step must be positive")
+    if proof_step is None:
+        proof_step = min(0.1, step)
+    if proof_step <= 0.0:
+        raise ValueError("departure proof resolution must be positive")
 
     aligned = (
         original
@@ -447,6 +492,7 @@ def analyze_departure_windows(
     historical_status = "none"
     continued = False
     evidence: dict[float, DepartureProbe] = {}
+    prior_selected_departure = None
     if prior is not None:
         prior_payload = (
             prior.to_dict() if isinstance(prior, DepartureWindowAnalysis) else prior
@@ -455,6 +501,9 @@ def analyze_departure_windows(
             prior_payload = prior_payload.get("departure_windows") or {}
         historical_signature = prior_payload.get("schedule_signature")
         prior_route = prior_payload.get("route_fingerprint")
+        prior_selected_value = prior_payload.get("selected_departure")
+        if prior_selected_value is not None:
+            prior_selected_departure = round(float(prior_selected_value), 9)
         if historical_signature == new_signature and prior_route in (None, "", fingerprint):
             # Same timetable and same route: old point verdicts still apply.
             # Narrowing the range simply filters them; each kept probe stays
@@ -471,30 +520,147 @@ def analyze_departure_windows(
             historical_status = "same_timetable"
         else:
             historical_status = "needs_recheck"
+            evidence = {}
 
-    grid = [earliest_departure]
-    interior_count = max(
-        0, int(math.floor((latest_departure - earliest_departure) / step + 1e-9)) - 1
-    )
-    for index in range(1, interior_count + 1):
-        grid.append(earliest_departure + index * step)
-    if abs(grid[-1] - latest_departure) > 1e-9:
-        grid.append(latest_departure)
-    # Zero-width ranges and duplicate grid points are probed once, never twice.
-    grid = list(dict.fromkeys(round(value, 9) for value in grid))
+    # Exact requested grid for arbitrary non-integer origin/step: every whole
+    # multiple of step inside the range, plus the exact latest boundary.
+    span = latest_departure - earliest_departure
+    multiples = int(math.floor(span / step + 1e-9)) if span > 1e-9 else 0
+    grid = [round(earliest_departure + index * step, 9) for index in range(multiples + 1)]
+    if not grid or abs(grid[-1] - latest_departure) > 1e-9:
+        grid.append(round(latest_departure, 9))
+    grid = [value for value in dict.fromkeys(grid) if value <= latest_departure + 1e-9]
     probes_requested = len(grid)
 
     newly_probed: list[float] = []
     budget_exhausted = False
-    for departure in grid:
-        if departure in evidence:
-            continue  # already checked in a previous round: not counted again
+    # The two boundaries are probed before any interior. With budget 2 the
+    # report therefore contains point verdicts at both ends and an unknown
+    # middle, never a midpoint-derived safe/blocked split.
+    boundary_keys = {round(earliest_departure, 9), round(latest_departure, 9)}
+    ordered_grid = sorted(grid, key=lambda value: (value not in boundary_keys, value))
+
+    def run_probe(departure: float, gap_tag: tuple[float, float] | None = None) -> DepartureProbe | None:
+        nonlocal budget_exhausted
+        departure = round(departure, 9)
+        existing = evidence.get(departure)
+        reusable = existing is not None
+        if reusable:
+            return existing
         if len(newly_probed) >= max_probes:
             budget_exhausted = True
-            break
+            return None
         feasible, names, _ = _probe_departure(aligned, vehicle, new_scene, departure)
-        evidence[departure] = DepartureProbe(departure, feasible, names)
+        probe = DepartureProbe(departure, feasible, names, gap_tag=gap_tag)
+        evidence[departure] = probe
         newly_probed.append(departure)
+        return probe
+
+    for departure in ordered_grid:
+        if run_probe(departure) is None:
+            break
+
+    def gap_chain(left: float, right: float) -> list[float]:
+        width = right - left
+        pieces = max(1, int(math.ceil(width / proof_step - 1e-9)))
+        local_step = width / pieces
+        values = [left]
+        values.extend(round(left + index * local_step, 9) for index in range(1, pieces))
+        values.append(right)
+        return list(dict.fromkeys(values))
+
+    # A grid gap receives a continuous verdict only after a dense sweep.
+    # Same-verdict adjacent samples form a swept span; a verdict transition
+    # remains unverified so a narrow conflict window cannot be hidden.
+    certified: dict[tuple[float, float], list[DepartureWindow]] = {}
+    for gap_index in range(len(grid) - 1):
+        left, right = grid[gap_index], grid[gap_index + 1]
+        if left not in evidence or right not in evidence:
+            budget_exhausted = True
+            continue
+        tag = (left, right)
+        chain_times = gap_chain(left, right)
+        chain: list[DepartureProbe] = []
+        complete = True
+        for value in chain_times:
+            probe = run_probe(value, None if value in boundary_keys or value in grid else tag)
+            if probe is None:
+                complete = False
+                break
+            chain.append(probe)
+        if not complete:
+            continue
+
+        partitions: list[DepartureWindow] = []
+        run_start = 0
+        while run_start < len(chain):
+            run_end = run_start
+            while (
+                run_end + 1 < len(chain)
+                and chain[run_end + 1].feasible == chain[run_start].feasible
+                and chain[run_end + 1].obstacles == chain[run_start].obstacles
+            ):
+                run_end += 1
+            start_time = chain[run_start].departure_time
+            end_time = chain[run_end].departure_time
+            kind = "safe" if chain[run_start].feasible else "blocked"
+            if run_end > run_start:
+                note = (
+                    f"连续{'可行' if chain[run_start].feasible else '阻塞'}区间："
+                    f"按 {proof_step:.3f}s 证明分辨率在出发轴密扫掠，"+
+                    ("每个采样时刻沿原路线全程无冲突；不是相邻点中点划分"
+                     if chain[run_start].feasible
+                     else "每个采样时刻都扫描到具体障碍占用；中间窄冲突窗口不会漏掉")
+                )
+                partitions.append(
+                    DepartureWindow(
+                        kind=kind,
+                        start_time=start_time,
+                        end_time=end_time,
+                        obstacles=chain[run_start].obstacles,
+                        note=note,
+                        probes=run_end - run_start + 1,
+                        evidence_type="swept",
+                    )
+                )
+            if run_end + 1 < len(chain) and run_end == run_start:
+                partitions.append(
+                    DepartureWindow(
+                        kind=kind,
+                        start_time=end_time,
+                        end_time=end_time,
+                        obstacles=chain[run_start].obstacles,
+                        note="已测点：仅该出发时刻，单点不外推",
+                        probes=1,
+                        evidence_type="point",
+                    )
+                )
+            if run_end == run_start and not (
+                run_start == 0 and run_end + 1 < len(chain)
+            ):
+                partitions.append(
+                    DepartureWindow(
+                        kind=kind,
+                        start_time=end_time,
+                        end_time=end_time,
+                        obstacles=chain[run_start].obstacles,
+                        note="已测点：仅该出发时刻，单点不外推",
+                        probes=1,
+                        evidence_type="point",
+                    )
+                )
+            if run_end + 1 < len(chain):
+                partitions.append(
+                    DepartureWindow(
+                        kind="unverified",
+                        start_time=end_time,
+                        end_time=chain[run_end + 1].departure_time,
+                        note="结论转换处未连续证明：可能存在窄冲突窗口，保留未知",
+                        evidence_type="none",
+                    )
+                )
+            run_start = run_end + 1
+        certified[(left, right)] = partitions
 
     boundaries = tuple(
         BoundaryProbe(
@@ -510,9 +676,15 @@ def analyze_departure_windows(
     )
 
     ordered = [evidence[key] for key in sorted(evidence)]
-    half = step / 2.0
+    point_times = sorted(
+        key
+        for key in evidence
+        if earliest_departure - 1e-9 <= key <= latest_departure + 1e-9
+    )
     windows: list[DepartureWindow] = []
-    cursor = earliest_departure
+    cursor = round(earliest_departure, 9)
+    latest_key = round(latest_departure, 9)
+    point_index = 0
 
     def emit_unverified(start: float, end: float) -> None:
         if end - start > 1e-9:
@@ -521,79 +693,113 @@ def analyze_departure_windows(
                     kind="unverified",
                     start_time=start,
                     end_time=end,
-                    note="未核对范围：证据不足（预算耗尽或采样间隔变化留下的间隙），既非安全也非失败",
+                    note="未核对范围：缺少实测点或连续扫掠证明，既不能宣称安全也不能宣称失败",
+                    evidence_type="none",
                 )
             )
 
-    # Each probe owns a half-step cell; consecutive probes split at the
-    # midpoint. Anything not covered by a cell stays unverified, so windows
-    # partition the range without overlaps or contradictions.
-    for index, probe in enumerate(ordered):
-        at_time = probe.departure_time
-        left = at_time - half
-        right = at_time + half
-        if index == 0 and abs(at_time - earliest_departure) <= 1e-9:
-            left = earliest_departure
-        if index == len(ordered) - 1 and abs(at_time - latest_departure) <= 1e-9:
-            right = latest_departure
-        if index > 0:
-            left = max(left, (ordered[index - 1].departure_time + at_time) / 2.0)
-        if index < len(ordered) - 1:
-            right = min(right, (at_time + ordered[index + 1].departure_time) / 2.0)
-        left = min(max(left, earliest_departure), latest_departure)
-        right = min(max(right, earliest_departure), latest_departure)
-        if left > cursor + 1e-9:
-            emit_unverified(cursor, left)
-        left = max(left, cursor)
-        kind = "safe" if probe.feasible else "blocked"
-        if (
-            windows
-            and windows[-1].kind == kind
-            and windows[-1].obstacles == probe.obstacles
-            and abs(windows[-1].end_time - left) <= 1e-9
-        ):
-            previous = windows[-1]
-            windows[-1] = replace(previous, end_time=right, probes=previous.probes + 1)
+    # Lay certified gaps over point evidence. Point windows are zero width;
+    # unknown spans fill every remaining gap, including the entire interior
+    # when only the two boundaries were probed.
+    while cursor < latest_key - 1e-9:
+        gap = next(
+            ((left, right) for left, right in certified if abs(left - cursor) <= 1e-9),
+            None,
+        )
+        if gap is not None:
+            windows.extend(certified[gap])
+            cursor = round(gap[1], 9)
+            point_index = next(
+                (index for index, value in enumerate(point_times) if value >= cursor - 1e-9),
+                len(point_times),
+            )
+            continue
+        while point_index < len(point_times) and point_times[point_index] < cursor - 1e-9:
+            point_index += 1
+        if point_index >= len(point_times):
+            emit_unverified(cursor, latest_key)
+            cursor = latest_key
+            break
+        at_time = point_times[point_index]
+        inside_certified = any(
+            abs(left - cursor) <= 1e-9 or (
+                left <= cursor - 1e-9 and right >= at_time - 1e-9
+            )
+            for left, right in certified
+        )
+        point_index += 1
+        if inside_certified:
+            continue
+        emit_unverified(cursor, at_time)
+        probe = evidence[at_time]
+        windows.append(
+            DepartureWindow(
+                kind="safe" if probe.feasible else "blocked",
+                start_time=at_time,
+                end_time=at_time,
+                obstacles=probe.obstacles,
+                note=(
+                    "已测点：仅该出发时刻沿原路线完成全程扫描，单点不构成连续安全结论"
+                    if probe.feasible
+                    else "已测点：该出发时刻扫描到具体障碍占用，单点不构成连续阻塞结论"
+                ),
+                probes=1,
+                evidence_type="point",
+            )
+        )
+        cursor = at_time
+    emit_unverified(cursor, latest_key)
+    if abs(earliest_departure - latest_departure) <= 1e-9 and not windows:
+        value = round(earliest_departure, 9)
+        if value in evidence:
+            probe = evidence[value]
+            windows.append(
+                DepartureWindow(
+                    kind="safe" if probe.feasible else "blocked",
+                    start_time=value,
+                    end_time=value,
+                    obstacles=probe.obstacles,
+                    note="零宽范围的已测点",
+                    probes=1,
+                    evidence_type="point",
+                )
+            )
         else:
             windows.append(
                 DepartureWindow(
-                    kind=kind,
-                    start_time=left,
-                    end_time=right,
-                    obstacles=probe.obstacles,
-                    probes=1,
+                    kind="unverified",
+                    start_time=value,
+                    end_time=value,
+                    note="零宽范围尚未探测",
+                    evidence_type="none",
                 )
             )
-        cursor = max(cursor, right)
-    emit_unverified(cursor, latest_departure)
-
-    # Annotate what each verified window actually covers: a merged window
-    # stands for its grid samples at the analysis step (endpoints included);
-    # a lone probe never implies its unchecked neighbours.
-    annotated: list[DepartureWindow] = []
-    for window in windows:
-        if window.kind == "safe":
-            if window.probes > 1:
-                note = (
-                    f"连续可行区间：覆盖 [{window.start_time:.3f}, {window.end_time:.3f}]s 内"
-                    f"步长 {step}s 的 {window.probes} 个已核对采样点（含两端边界）；"
-                    "边界条件为等间隔采样点逐一全程无冲突"
-                )
-            else:
-                note = "仅该出发时刻（±半步长单元）已核对，不外推至未核对的邻近时刻"
-            window = replace(window, note=note)
-        elif window.kind == "blocked":
-            window = replace(window, note="出发窗口内全程扫描到具体障碍占用")
-        annotated.append(window)
 
     selected_departure = next(
         (probe.departure_time for probe in ordered if probe.feasible), None
     )
 
+    prior_selection_status = "none"
+    if prior is not None:
+        if historical_status == "needs_recheck":
+            prior_selection_status = "stale_context"
+        elif prior_selected_departure is not None:
+            old_probe = evidence.get(prior_selected_departure)
+            in_range = (
+                earliest_departure - 1e-9
+                <= prior_selected_departure
+                <= latest_departure + 1e-9
+            )
+            if in_range and old_probe is not None and old_probe.feasible:
+                prior_selection_status = "still_verified"
+            else:
+                prior_selection_status = "invalidated"
+
     return DepartureWindowAnalysis(
         earliest_departure=earliest_departure,
         latest_departure=latest_departure,
         step=step,
+        proof_resolution=proof_step,
         probes_requested=probes_requested,
         probes_completed=len(evidence),
         probes_this_round=len(newly_probed),
@@ -601,7 +807,7 @@ def analyze_departure_windows(
         continued=continued,
         budget_exhausted=budget_exhausted,
         boundaries=boundaries,
-        windows=tuple(annotated),
+        windows=tuple(windows),
         probes=tuple(ordered),
         selected_departure=selected_departure,
         selected_verified=selected_departure is not None,
@@ -610,6 +816,8 @@ def analyze_departure_windows(
         route_fingerprint=fingerprint,
         historical_signature=historical_signature,
         historical_status=historical_status,
+        prior_selected_departure=prior_selected_departure,
+        prior_selection_status=prior_selection_status,
     )
 
 
@@ -737,6 +945,7 @@ def evaluate_reopen(
     latest_departure: float | None = None,
     departure_step: float = 0.2,
     departure_budget: int = 300,
+    departure_proof_step: float | None = None,
     historical_report: dict | None = None,
 ) -> ReopenAssessment:
     """Reopen a successful plan against a changed obstacle timetable.
@@ -856,6 +1065,7 @@ def evaluate_reopen(
             latest_departure=latest_departure,
             step=departure_step,
             max_probes=departure_budget,
+            proof_step=departure_proof_step,
             prior=historical_report,
         )
 

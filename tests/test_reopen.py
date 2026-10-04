@@ -166,9 +166,15 @@ def test_departure_windows_classify_safe_blocked_and_boundaries(base):
     assert labels["earliest"].departure_time == 0.0
     assert labels["latest"].departure_time == 8.0
     kinds = [window.kind for window in analysis.windows]
-    assert "safe" in kinds and "blocked" in kinds and "unverified" not in kinds
+    assert "safe" in kinds and "blocked" in kinds and "unverified" in kinds
     blocked = [window for window in analysis.windows if window.kind == "blocked"]
     assert all(window.obstacles for window in blocked)
+    point_windows = [window for window in analysis.windows if window.evidence_type == "point"]
+    assert all(window.start_time == window.end_time for window in point_windows)
+    swept = [window for window in analysis.windows if window.evidence_type == "swept"]
+    assert all(window.end_time > window.start_time for window in swept)
+    transition = [window for window in analysis.windows if window.kind == "unverified"]
+    assert all(window.evidence_type == "none" for window in transition)
     # A time selected from a safe window replays the whole route successfully.
     assert analysis.selected_departure is not None
     delayed_plan = find_delayed_plan(
@@ -183,13 +189,122 @@ def test_departure_window_budget_leaves_unverified_tail_not_safe(base):
     scene = changed_scene(data, EARLY)
     analysis = analyze_departure_windows(
         plan, vehicle, scene,
-        earliest_departure=0.0, latest_departure=10.0, step=0.5, max_probes=4,
+        earliest_departure=0.0, latest_departure=10.0, step=0.5, max_probes=2,
     )
     assert analysis.budget_exhausted is True
-    assert analysis.probes_completed == 4
+    assert analysis.probes_completed == 2
     tail = [w for w in analysis.windows if w.kind == "unverified"]
     assert len(tail) == 1
     assert tail[0].end_time == 10.0
+    assert tail[0].start_time == 0.0
+    assert [p.departure_time for p in analysis.probes] == [0.0, 10.0]
+
+
+def test_endpoint_only_budget_keeps_interior_unknown(base):
+    vehicle, data, plan = base
+    scene = changed_scene(data, EARLY)
+    analysis = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=8.0, step=0.5, max_probes=2,
+    )
+    times = {probe.departure_time: probe for probe in analysis.probes}
+    assert sorted(times) == [0.0, 8.0]
+    assert times[0.0].feasible is False
+    assert times[8.0].feasible is True
+    assert [window for window in analysis.windows if window.start_time == window.end_time]
+    unknown = [window for window in analysis.windows if window.kind == "unverified"]
+    assert [(window.start_time, window.end_time) for window in unknown] == [(0.0, 8.0)]
+    assert not any(
+        window.kind == "safe" and window.end_time > window.start_time
+        for window in analysis.windows
+    )
+
+
+def test_added_budget_only_certifies_swept_gap(base):
+    vehicle, data, plan = base
+    scene = changed_scene(data, EARLY)
+    first = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=2.0, step=1.0,
+        max_probes=2, proof_step=1.0,
+    )
+    assert [(probe.departure_time, probe.feasible) for probe in first.probes] == [
+        (0.0, False), (2.0, True)
+    ]
+    resumed = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=2.0, step=1.0,
+        max_probes=10, proof_step=1.0, prior=first,
+    )
+    assert resumed.probes_this_round == 1
+    assert resumed.newly_probed == (1.0,)
+    blocked_point, unknown, middle_point, safe_swept = resumed.windows
+    assert blocked_point.evidence_type == "point"
+    assert blocked_point.start_time == blocked_point.end_time == 0.0
+    assert unknown.kind == "unverified" and (unknown.start_time, unknown.end_time) == (0.0, 1.0)
+    assert middle_point.kind == "safe" and middle_point.start_time == middle_point.end_time == 1.0
+    assert safe_swept.kind == "safe" and safe_swept.evidence_type == "swept"
+    assert (safe_swept.start_time, safe_swept.end_time) == (1.0, 2.0)
+
+
+def test_non_integer_origin_and_step_restore_exactly(base):
+    vehicle, data, plan = base
+    scene = changed_scene(data, AVOID)
+    first = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.25, latest_departure=2.0,
+        step=0.35, max_probes=3, proof_step=0.35,
+    )
+    assert first.probes_requested == 6
+    assert first.newly_probed[:3] == (0.25, 2.0, 0.6)
+    payload = json.loads(json.dumps(first.to_dict()))
+    resumed = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.25, latest_departure=2.0,
+        step=0.35, max_probes=10, proof_step=0.35,
+        prior={"departure_windows": payload},
+    )
+    old_times = {probe.departure_time for probe in first.probes}
+    assert set(resumed.newly_probed).isdisjoint(old_times)
+    assert resumed.probes_completed == 6
+    restored_times = {
+        probe["departure_time"] for probe in payload["probes"]
+    }
+    assert 0.25 in restored_times and 0.6 in restored_times
+
+
+def test_narrow_middle_conflict_is_not_hidden_by_endpoint_safety(base):
+    vehicle, data, plan = base
+    # The obstacle stays far away except for a short middle-time crossing.
+    narrow = [
+        [0.0, -15.0, 9.5, 0.0],
+        [3.6, -15.0, 9.5, 0.0],
+        [4.0, 11.0, 4.0, 0.0],
+        [4.6, 11.0, 4.0, 0.0],
+        [5.0, -15.0, 9.5, 0.0],
+        [12.0, -15.0, 9.5, 0.0],
+    ]
+    scene = changed_scene(data, narrow)
+    endpoints = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=8.0, step=0.25,
+        max_probes=2, proof_step=0.05,
+    )
+    assert [probe.departure_time for probe in endpoints.probes] == [0.0, 8.0]
+    assert endpoints.selected_departure == 0.0
+    assert [(w.kind, w.start_time, w.end_time) for w in endpoints.windows if w.kind == "unverified"] == [
+        ("unverified", 0.0, 8.0)
+    ]
+    swept = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=8.0, step=0.25,
+        max_probes=500, proof_step=0.05,
+    )
+    blocked = [window for window in swept.windows if window.kind == "blocked"]
+    assert blocked
+    assert any("trolley" in window.obstacles for window in blocked)
+    middle_blocked = [window for window in blocked if 0.0 < window.start_time < 1.0]
+    assert middle_blocked
 
 
 def _assert_partition(analysis):
@@ -212,12 +327,13 @@ def test_single_probe_budget_gives_no_contradictory_verdicts(base):
     assert analysis.budget_exhausted is True
     assert analysis.probes_completed == 1
     _assert_partition(analysis)
-    # The probed cell and the unverified tail never overlap ...
+    # One probed point and the unknown rest never overlap.
     verified = [w for w in analysis.windows if w.kind != "unverified"]
     assert len(verified) == 1
-    assert verified[0].start_time == 0.0 and verified[0].end_time == pytest.approx(0.25)
+    assert verified[0].start_time == 0.0 and verified[0].end_time == 0.0
+    assert verified[0].evidence_type == "point"
     tail = [w for w in analysis.windows if w.kind == "unverified"]
-    assert len(tail) == 1 and tail[0].start_time == pytest.approx(0.25)
+    assert len(tail) == 1 and tail[0].start_time == 0.0
     # ... the unreached latest boundary is unknown, not a failure ...
     labels = {item.label: item for item in analysis.boundaries}
     assert labels["earliest"].probed is True
@@ -240,7 +356,7 @@ def test_budget_topup_continues_search_and_keeps_evidence(base):
     resumed = analyze_departure_windows(
         plan, vehicle, scene,
         earliest_departure=0.0, latest_departure=8.0, step=0.5,
-        max_probes=300, prior=first,
+        max_probes=300, proof_step=0.5, prior=first,
     )
     assert resumed.continued is True
     assert resumed.historical_status == "same_timetable"
@@ -252,7 +368,7 @@ def test_budget_topup_continues_search_and_keeps_evidence(base):
     for at_time, probe in old.items():
         assert new[at_time].feasible == probe.feasible
     assert set(resumed.newly_probed).isdisjoint(old)
-    assert all(w.kind != "unverified" for w in resumed.windows)
+    assert any(w.evidence_type == "swept" for w in resumed.windows)
     _assert_partition(resumed)
 
 
@@ -289,11 +405,11 @@ def test_changing_step_leaves_intermediate_times_unverified(base):
     coarse = analyze_departure_windows(
         plan, vehicle, scene,
         earliest_departure=0.0, latest_departure=4.0, step=1.0,
+        proof_step=1.0,
     )
     assert all(w.kind == "safe" for w in coarse.windows)
-    # Finer step, zero extra budget: probed integer times stay safe, the
-    # half-integer gaps are unverified -- endpoints passing does not imply
-    # the middle passes.
+    # Finer step, zero extra budget: probed integer times stay zero-width
+    # safe points; every half-integer gap remains unverified.
     refined = analyze_departure_windows(
         plan, vehicle, scene,
         earliest_departure=0.0, latest_departure=4.0, step=0.5,
@@ -305,7 +421,7 @@ def test_changing_step_leaves_intermediate_times_unverified(base):
     _assert_partition(refined)
     gaps = [w for w in refined.windows if w.kind == "unverified"]
     assert any(
-        g.start_time == pytest.approx(0.25) and g.end_time == pytest.approx(0.75)
+        g.start_time == pytest.approx(0.0) and g.end_time == pytest.approx(1.0)
         for g in gaps
     )
 
@@ -345,6 +461,24 @@ def test_scene_change_invalidates_prior_evidence(base):
     assert resumed.continued is False
     assert resumed.probes_this_round == resumed.probes_completed
     assert resumed.schedule_signature == scene_late.signature()
+    assert resumed.prior_selection_status == "stale_context"
+
+
+def test_old_selection_out_of_range_is_explicitly_invalidated(base):
+    vehicle, data, plan = base
+    scene = changed_scene(data, EARLY)
+    first = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=6.0, latest_departure=8.0, step=0.5, proof_step=0.5,
+    )
+    assert first.selected_departure is not None
+    narrowed = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=2.0, step=0.5, proof_step=0.5,
+        prior=first,
+    )
+    assert narrowed.prior_selected_departure == first.selected_departure
+    assert narrowed.prior_selection_status == "invalidated"
 
 
 def test_selection_records_scene_route_and_verdict(base):
@@ -392,8 +526,9 @@ def test_historical_report_is_tagged_never_adopted(base, tmp_path):
         {"departure_windows": {"schedule_signature": other_scene.signature()}},
     )
     assert stale.historical_status == "needs_recheck"
-    # Current safe/blocked verdicts come from fresh probes, never from history.
-    assert all(w.kind != "unverified" for w in stale.windows)
+    # Current verdicts come from fresh probes/sweeps, never from history.
+    assert stale.historical_signature == other_scene.signature()
+    assert all(w.probes >= 1 for w in stale.windows if w.kind != "unverified")
 
 
 def test_reopen_includes_selected_window_plan_and_preserves_history(base, cheap_replan, tmp_path):
