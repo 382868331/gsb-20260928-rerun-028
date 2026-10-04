@@ -199,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
                 names = ",".join(window.obstacles) or "-"
                 print(
                     f"  {window.kind:10s} {window.start_time:6.2f}-{window.end_time:6.2f}s "
-                    f"obstacles={names}"
+                    f"evidence={window.evidence_type} obstacles={names}"
                 )
             if windows.selected_departure is not None:
                 print(f"selected_departure={windows.selected_departure:.2f}s (fully verified)")
