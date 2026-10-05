@@ -422,17 +422,17 @@ def analyze_departure_windows(
     """Classify a departure-time range into safe / blocked / unverified windows.
 
     Evidence model: each probe is a point verdict for exactly one departure
-    time. Three evidence levels are reported strictly separately:
+    time, and point verdicts are the only form of evidence. Two evidence
+    levels are reported strictly separately:
 
-    * probed points: a lone probe stands for its own moment only (a
-      zero-width window) and is never extrapolated;
-    * continuous intervals: only adjacent probes no more than one step
-      apart share a cell boundary at their midpoint, so a continuous
-      safe/blocked span always rests on dense point evidence;
-    * unknown ranges: anything never probed (budget tail, gaps between
-      probes farther apart than the step, gaps left by a changed sampling
-      step, range edges) is reported as unverified and is never promoted
-      to safe or failure by midpoint splitting alone.
+    * probed points: a probe stands for its own moment only (a zero-width
+      window) and is never extrapolated, however dense the sampling is;
+    * unknown ranges: anything between two probed moments has no
+      independent continuous coverage evidence, so it stays unverified --
+      the sampling step decides which moments get checked, never how far
+      one verdict reaches. Endpoint agreement, a step-sized gap, an
+      exhausted budget, or a changed sampling step never promote an
+      unchecked gap to safe (or to failure).
 
     Boundary probes that were not reached are reported as unprobed, never
     as infeasible.
@@ -545,130 +545,42 @@ def analyze_departure_windows(
                     kind="unverified",
                     start_time=start,
                     end_time=end,
-                    note="未核对范围：证据不足（预算耗尽或采样间隔变化留下的间隙），既非安全也非失败",
+                    note="未核对范围：没有独立连续覆盖证据（探测点之间的空隙、预算未覆盖或采样间隔变化留下的范围），既非安全也非失败",
                 )
             )
 
-    # Each probe is a point verdict. A continuous span needs a dense chain
-    # of evidence: two adjacent verdicts may share a cell boundary at their
-    # midpoint only when no nominal grid moment strictly between them was
-    # left unchecked at a spacing no larger than the requested step (i.e.
-    # the two points are adjacent members of one dense, fully probed
-    # chain). Two probes with an unprobed nominal point between them never
-    # form such a link, even when their gap happens to equal one step (a
-    # coarse step or an exhausted budget cannot manufacture continuous
-    # coverage from isolated endpoints). Old evidence from a finer grid
-    # still links normally via the intermediate moments it really checked.
-    # Anything not covered by a cell stays unverified, so windows partition
-    # the range without overlaps or contradictions.
-    grid_set = {value for value in grid if value in evidence}
-    earliest_key = round(earliest_departure, 9)
-    latest_key = round(latest_departure, 9)
-
-    def densely_covered(previous_time: float, next_time: float) -> bool:
-        """True only when the gap rests on a fully probed dense grid chain.
-
-        Adjacent verdicts at most one step apart still need every nominal
-        interior grid point present as evidence; two isolated boundary
-        points therefore never cover the range between them on their own.
-        """
-
-        gap = next_time - previous_time
-        if gap > step + 1e-9:
-            return False
-        left_key = round(previous_time, 9)
-        right_key = round(next_time, 9)
-        # When the two range boundaries are adjacent in the evidence, no
-        # moment between them was probed at all: isolated endpoints never
-        # prove the interior, however large the declared step is.
-        if (
-            latest_departure - earliest_departure > 1e-9
-            and left_key == earliest_key
-            and right_key == latest_key
-        ):
-            return False
-        # Nominal grid moments strictly inside the gap must all have been
-        # probed; iterating beyond one span also rejects endpoints that are
-        # adjacent only because the interior ran out of budget.
-        offset = 1
-        expected = round(previous_time + step, 9)
-        while expected < right_key - 1e-9:
-            if expected not in grid_set:
-                return False
-            offset += 1
-            expected = round(previous_time + offset * step, 9)
-        return True
-
-    cells: list[tuple[float, float]] = []
-    for index, probe in enumerate(ordered):
+    # Each probe is a point verdict for its own departure moment only. The
+    # sampling step decides which moments get checked, never how far one
+    # verdict reaches: the gap between two probed moments has no
+    # independent continuous coverage evidence, so it stays unverified no
+    # matter how small the step is or how strongly the two endpoints
+    # agree. Windows therefore partition the range into zero-width probed
+    # points and the unverified gaps between them, without overlaps.
+    for probe in ordered:
         at_time = probe.departure_time
-        left = at_time
-        right = at_time
-        if index > 0:
-            previous_time = ordered[index - 1].departure_time
-            if densely_covered(previous_time, at_time):
-                left = (previous_time + at_time) / 2.0
-        if index < len(ordered) - 1:
-            next_time = ordered[index + 1].departure_time
-            if densely_covered(at_time, next_time):
-                right = (at_time + next_time) / 2.0
-        left = min(max(left, earliest_departure), latest_departure)
-        right = min(max(right, earliest_departure), latest_departure)
-        cells.append((left, right))
-
-    for probe, (left, right) in zip(ordered, cells):
-        if left > cursor + 1e-9:
-            emit_unverified(cursor, left)
-        left = max(left, cursor)
+        if at_time > cursor + 1e-9:
+            emit_unverified(cursor, at_time)
         kind = "safe" if probe.feasible else "blocked"
-        if (
-            windows
-            and windows[-1].kind == kind
-            and windows[-1].obstacles == probe.obstacles
-            and abs(windows[-1].end_time - left) <= 1e-9
-        ):
-            previous = windows[-1]
-            windows[-1] = replace(previous, end_time=right, probes=previous.probes + 1)
-        else:
-            windows.append(
-                DepartureWindow(
-                    kind=kind,
-                    start_time=left,
-                    end_time=right,
-                    obstacles=probe.obstacles,
-                    probes=1,
-                )
+        verdict = "可行" if probe.feasible else "冲突"
+        note = (
+            f"已测点：仅出发时刻 {at_time:.3f}s 本身已核对（{verdict}），"
+            "两侧未核对范围保持未知，不因采样步长达到设定值而外推"
+        )
+        if kind == "blocked":
+            note += "；全程扫描到具体障碍占用"
+        windows.append(
+            DepartureWindow(
+                kind=kind,
+                start_time=at_time,
+                end_time=at_time,
+                obstacles=probe.obstacles,
+                note=note,
+                probes=1,
             )
-        cursor = max(cursor, right)
+        )
+        cursor = max(cursor, at_time)
     emit_unverified(cursor, latest_departure)
-
-    # Annotate what each verified window actually covers: a merged window
-    # stands for its grid samples at the analysis step (endpoints included);
-    # a lone probe never implies its unchecked neighbours.
-    annotated: list[DepartureWindow] = []
-    for window in windows:
-        if window.kind in ("safe", "blocked"):
-            verdict = "可行" if window.kind == "safe" else "冲突"
-            if window.probes > 1:
-                note = (
-                    f"连续{verdict}区间：覆盖 [{window.start_time:.3f}, {window.end_time:.3f}]s 内"
-                    f"步长不超过 {step}s 的 {window.probes} 个已核对采样点（含两端边界）；"
-                    "边界条件为相邻采样点逐一全程扫描结论一致"
-                )
-            elif window.end_time - window.start_time <= 1e-9:
-                note = (
-                    f"已测点：仅出发时刻 {window.start_time:.3f}s 本身已核对（{verdict}），"
-                    "两侧未核对范围保持未知，不外推"
-                )
-            else:
-                note = (
-                    f"已测点：出发时刻已核对（{verdict}）；单元边界为与相邻已探测点"
-                    "（间距不超过步长）的中点，不代表未探测的更细时刻"
-                )
-            if window.kind == "blocked":
-                note += "；全程扫描到具体障碍占用"
-            window = replace(window, note=note)
-        annotated.append(window)
+    annotated = windows
 
     selected_departure = next(
         (probe.departure_time for probe in ordered if probe.feasible), None

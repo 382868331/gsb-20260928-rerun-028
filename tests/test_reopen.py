@@ -48,6 +48,18 @@ MIDDLE = [
     [21.1, -30.0, 6.0, 0.0],
     [30.0, -30.0, 6.0, 0.0],
 ]
+# Obstacle darts into a glancing corner of the swept area only during
+# t=4.733-4.892s: solely the departure shift ~0.75s collides, so a 0.4s
+# sampling grid (0.15/0.55/0.95/1.35) sees four clean points while the
+# brief occupation hides entirely between the sample moments.
+BRIEF = [
+    [0.0, 11.0, -8.0, 0.0],
+    [4.703, 11.0, -8.0, 0.0],
+    [4.733, 11.0, 1.5, 0.0],
+    [4.892, 11.0, 1.5, 0.0],
+    [4.922, 11.0, -8.0, 0.0],
+    [30.0, 11.0, -8.0, 0.0],
+]
 
 
 @pytest.fixture(scope="module")
@@ -176,7 +188,12 @@ def test_departure_windows_classify_safe_blocked_and_boundaries(base):
     assert labels["earliest"].departure_time == 0.0
     assert labels["latest"].departure_time == 8.0
     kinds = [window.kind for window in analysis.windows]
-    assert "safe" in kinds and "blocked" in kinds and "unverified" not in kinds
+    assert "safe" in kinds and "blocked" in kinds and "unverified" in kinds
+    # Verified verdicts are zero-width probed points; everything between
+    # probed moments stays unverified even at full dense sampling.
+    verified = [w for w in analysis.windows if w.kind != "unverified"]
+    assert all(w.start_time == pytest.approx(w.end_time) for w in verified)
+    _assert_partition(analysis)
     blocked = [window for window in analysis.windows if window.kind == "blocked"]
     assert all(window.obstacles for window in blocked)
     # A time selected from a safe window replays the whole route successfully.
@@ -198,8 +215,13 @@ def test_departure_window_budget_leaves_unverified_tail_not_safe(base):
     assert analysis.budget_exhausted is True
     assert analysis.probes_completed == 4
     tail = [w for w in analysis.windows if w.kind == "unverified"]
-    assert len(tail) == 1
-    assert tail[0].end_time == 10.0
+    assert tail and tail[-1].end_time == 10.0
+    # The probed latest boundary is a zero-width point; the unverified
+    # tail reaches right up to it.
+    assert analysis.windows[-1].kind != "unverified"
+    assert analysis.windows[-1].start_time == pytest.approx(10.0)
+    assert analysis.windows[-1].end_time == pytest.approx(10.0)
+    _assert_partition(analysis)
 
 
 def _assert_partition(analysis):
@@ -264,7 +286,12 @@ def test_budget_topup_continues_search_and_keeps_evidence(base):
     for at_time, probe in old.items():
         assert new[at_time].feasible == probe.feasible
     assert set(resumed.newly_probed).isdisjoint(old)
-    assert all(w.kind != "unverified" for w in resumed.windows)
+    # Fully probing the grid still yields point verdicts only: the gaps
+    # between sampled moments stay unverified, never merged into one
+    # continuous safe span by the sampling step alone.
+    verified = [w for w in resumed.windows if w.kind != "unverified"]
+    assert all(w.start_time == pytest.approx(w.end_time) for w in verified)
+    assert any(w.kind == "unverified" for w in resumed.windows)
     _assert_partition(resumed)
 
 
@@ -302,7 +329,12 @@ def test_changing_step_leaves_intermediate_times_unverified(base):
         plan, vehicle, scene,
         earliest_departure=0.0, latest_departure=4.0, step=1.0,
     )
-    assert all(w.kind == "safe" for w in coarse.windows)
+    # Even with every grid moment probed, the integer times are isolated
+    # point verdicts; the stretches between them remain unknown.
+    coarse_points = [w for w in coarse.windows if w.kind == "safe"]
+    assert all(w.start_time == pytest.approx(w.end_time) for w in coarse_points)
+    assert any(w.kind == "unverified" for w in coarse.windows)
+    assert all(w.kind != "blocked" for w in coarse.windows)
     # Finer step, zero extra budget: probed integer times stay safe, the
     # half-integer gaps are unverified -- endpoints passing does not imply
     # the middle passes.
@@ -393,10 +425,14 @@ def test_narrow_middle_conflict_not_hidden_by_sparse_probes(base):
         max_probes=300, prior=sparse,
     )
     assert resumed.probes_this_round == 15
-    assert all(w.kind != "unverified" for w in resumed.windows)
     blocked = [w for w in resumed.windows if w.kind == "blocked"]
     assert blocked and all(w.obstacles for w in blocked)
-    assert any(w.start_time > 0.0 and w.end_time < 8.0 for w in blocked)
+    # The conflict surfaces as zero-width blocked points strictly inside
+    # the range; the gaps around them are still unknown, not safe.
+    assert all(w.start_time == pytest.approx(w.end_time) for w in blocked)
+    assert any(0.0 < w.start_time < 8.0 for w in blocked)
+    assert any(w.kind == "unverified" for w in resumed.windows)
+    _assert_partition(resumed)
 
 
 def test_coarse_step_endpoints_only_never_cover_whole_range(base):
@@ -457,6 +493,115 @@ def test_coarse_step_endpoints_only_never_cover_whole_range(base):
     blocked = [w for w in expanded.windows if w.kind == "blocked"]
     assert blocked and all(w.obstacles for w in blocked)
     assert any(0.0 < w.start_time and w.end_time < 8.0 for w in blocked)
+
+
+def test_brief_occupier_between_sample_points_never_merged_into_safe_span(base):
+    vehicle, data, plan = base
+    scene = changed_scene(data, BRIEF)
+    # The user's scenario: start 0.15s, step 0.4s, both boundaries checked
+    # first, then 0.55s and 0.95s -- all four probes pass, while the brief
+    # occupation at ~0.75s hides between the sample moments.
+    first = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.15, latest_departure=1.35, step=0.4,
+    )
+    assert [p.departure_time for p in first.probes] == [0.15, 0.55, 0.95, 1.35]
+    assert all(p.feasible for p in first.probes)
+    # Four passing probes must NOT merge into a continuous 0.15-1.35s safe
+    # range: each probe is a zero-width point verdict, every gap between
+    # sample moments stays unverified (the step only picks the moments).
+    safe = [w for w in first.windows if w.kind == "safe"]
+    assert len(safe) == 4
+    assert all(w.start_time == pytest.approx(w.end_time) for w in safe)
+    assert not any(
+        w.kind != "unverified" and w.end_time - w.start_time > 1e-9
+        for w in first.windows
+    )
+    gaps = [w for w in first.windows if w.kind == "unverified"]
+    assert any(
+        g.start_time == pytest.approx(0.15) and g.end_time == pytest.approx(0.55)
+        for g in gaps
+    )
+    assert any(
+        g.start_time == pytest.approx(0.55) and g.end_time == pytest.approx(0.95)
+        for g in gaps
+    )
+    _assert_partition(first)
+    assert first.selected_departure == pytest.approx(0.15)
+
+    # Supplementary checks at a finer step: old facts are kept verbatim and
+    # only the newly checked moments are added; the hidden occupation
+    # surfaces as a zero-width blocked point at 0.75s, nothing more.
+    resumed = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.15, latest_departure=1.35, step=0.2,
+        max_probes=300, prior=first,
+    )
+    assert resumed.continued is True
+    assert resumed.historical_status == "same_timetable"
+    assert resumed.newly_probed == (0.35, 0.75, 1.15)
+    old = {p.departure_time: p for p in first.probes}
+    for probe in resumed.probes:
+        if probe.departure_time in old:
+            assert probe.feasible == old[probe.departure_time].feasible
+    blocked = [w for w in resumed.windows if w.kind == "blocked"]
+    assert len(blocked) == 1
+    assert blocked[0].start_time == pytest.approx(0.75)
+    assert blocked[0].end_time == pytest.approx(0.75)
+    assert blocked[0].obstacles == ("trolley",)
+    # New evidence confirms only the moments actually checked: the gaps
+    # around 0.75s remain unverified, and no safe span grew wider.
+    assert not any(
+        w.kind != "unverified" and w.end_time - w.start_time > 1e-9
+        for w in resumed.windows
+    )
+    assert any(w.kind == "unverified" for w in resumed.windows)
+    _assert_partition(resumed)
+    assert resumed.selected_departure == pytest.approx(0.15)
+    assert resumed.prior_selection_status == "kept"
+
+    # Changing the sampling density again with zero extra budget changes
+    # nothing: the same point facts, the same unknown gaps.
+    redensified = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.15, latest_departure=1.35, step=0.1,
+        max_probes=0, prior=resumed,
+    )
+    assert redensified.probes_this_round == 0
+    assert redensified.probes_completed == resumed.probes_completed
+    assert [w.kind for w in redensified.windows] == [w.kind for w in resumed.windows]
+
+    # Saving and restoring the report (repeated viewing) neither inflates
+    # the check count nor alters any conclusion.
+    payload = json.loads(json.dumps(resumed.to_dict()))
+    restored = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.15, latest_departure=1.35, step=0.2,
+        max_probes=300, prior={"departure_windows": payload},
+    )
+    assert restored.probes_this_round == 0
+    assert restored.probes_completed == resumed.probes_completed
+    assert [w.kind for w in restored.windows] == [w.kind for w in resumed.windows]
+
+    # A timetable revision discards the stitching entirely: old point facts
+    # are re-checked from scratch and the old selection lapses explicitly.
+    revised_payload = copy.deepcopy(data)
+    revised_payload["dynamic_obstacles"][0]["keyframes"] = [
+        [frame[0] + 1.0 if 4.7 <= frame[0] <= 4.95 else frame[0]] + frame[1:]
+        for frame in BRIEF
+    ]
+    revised = scene_from_dict(revised_payload)
+    rechecked = analyze_departure_windows(
+        plan, vehicle, revised,
+        earliest_departure=0.15, latest_departure=1.35, step=0.4,
+        max_probes=300, prior=resumed,
+    )
+    assert rechecked.historical_status == "needs_recheck"
+    assert rechecked.continued is False
+    assert rechecked.probes_this_round == rechecked.probes_completed
+    assert rechecked.prior_selected_departure == pytest.approx(0.15)
+    assert rechecked.prior_selection_status == "invalidated"
+    assert rechecked.prior_selection_note
 
 
 def test_non_integer_start_and_step_resume_without_double_counting(base):
@@ -569,7 +714,9 @@ def test_departure_windows_all_safe_when_obstacle_moves_away(base):
         plan, vehicle, scene,
         earliest_departure=0.0, latest_departure=5.0, step=0.5,
     )
-    assert all(w.kind == "safe" for w in analysis.windows)
+    assert all(w.kind != "blocked" for w in analysis.windows)
+    points = [w for w in analysis.windows if w.kind == "safe"]
+    assert points and all(w.start_time == pytest.approx(w.end_time) for w in points)
     assert all(b.feasible for b in analysis.boundaries)
     assert analysis.selected_departure == 0.0
 
@@ -593,7 +740,11 @@ def test_historical_report_is_tagged_never_adopted(base, tmp_path):
     )
     assert stale.historical_status == "needs_recheck"
     # Current safe/blocked verdicts come from fresh probes, never from history.
-    assert all(w.kind != "unverified" for w in stale.windows)
+    assert all(
+        w.start_time == pytest.approx(w.end_time)
+        for w in stale.windows
+        if w.kind != "unverified"
+    )
 
 
 def test_reopen_includes_selected_window_plan_and_preserves_history(base, cheap_replan, tmp_path):
