@@ -48,6 +48,17 @@ MIDDLE = [
     [21.1, -30.0, 6.0, 0.0],
     [30.0, -30.0, 6.0, 0.0],
 ]
+# Visits one late part of the route for only ~0.12s. The four moments
+# 0.15/0.55/0.95/1.35 all miss it, but one midpoint between them meets the
+# vehicle there: point agreement cannot cover the point-to-point gap.
+BRIEF = [
+    [0.0, 4.75, -50.0, 0.0],
+    [3.97, 4.75, -50.0, 0.0],
+    [4.0, 4.75, 10.75, 0.0],
+    [4.12, 4.75, 10.75, 0.0],
+    [4.15, 4.75, -50.0, 0.0],
+    [30.0, 4.75, -50.0, 0.0],
+]
 
 
 @pytest.fixture(scope="module")
@@ -198,8 +209,10 @@ def test_departure_window_budget_leaves_unverified_tail_not_safe(base):
     assert analysis.budget_exhausted is True
     assert analysis.probes_completed == 4
     tail = [w for w in analysis.windows if w.kind == "unverified"]
-    assert len(tail) == 1
-    assert tail[0].end_time == 10.0
+    assert len(tail) >= 1
+    assert tail[-1].end_time == 10.0
+    # Point probes never bridge gaps; no continuous safe window appears.
+    assert all(w.start_time == w.end_time for w in analysis.windows if w.kind == "safe")
 
 
 def _assert_partition(analysis):
@@ -257,7 +270,11 @@ def test_budget_topup_continues_search_and_keeps_evidence(base):
     assert resumed.continued is True
     assert resumed.historical_status == "same_timetable"
     assert resumed.probes_completed == 17
-    assert resumed.probes_this_round == 13
+    # The 13 remaining nominal points are checked first; the rest of the
+    # round buys independent fine-grained continuous coverage.
+    assert resumed.probes_this_round == 157
+    assert len(resumed.newly_probed) == 13
+    assert len(resumed.newly_swept) == 144
     # Old evidence is reused verbatim, only new positions consumed budget.
     old = {p.departure_time: p for p in first.probes}
     new = {p.departure_time: p for p in resumed.probes}
@@ -301,14 +318,18 @@ def test_changing_step_leaves_intermediate_times_unverified(base):
     coarse = analyze_departure_windows(
         plan, vehicle, scene,
         earliest_departure=0.0, latest_departure=4.0, step=1.0,
+        coverage_step=float("inf"),
     )
-    assert all(w.kind == "safe" for w in coarse.windows)
+    assert {
+        (w.kind, round(w.end_time - w.start_time, 9)) for w in coarse.windows
+    } == {("safe", 0.0), ("unverified", 1.0)}
     # Finer step, zero extra budget: probed integer times stay safe, the
     # half-integer gaps are unverified -- endpoints passing does not imply
     # the middle passes.
     refined = analyze_departure_windows(
         plan, vehicle, scene,
         earliest_departure=0.0, latest_departure=4.0, step=0.5,
+        coverage_step=float("inf"),
         max_probes=0, prior=coarse,
     )
     assert refined.probes_this_round == 0
@@ -392,7 +413,8 @@ def test_narrow_middle_conflict_not_hidden_by_sparse_probes(base):
         earliest_departure=0.0, latest_departure=8.0, step=0.5,
         max_probes=300, prior=sparse,
     )
-    assert resumed.probes_this_round == 15
+    assert len(resumed.newly_probed) == 15
+    assert resumed.newly_swept
     assert all(w.kind != "unverified" for w in resumed.windows)
     blocked = [w for w in resumed.windows if w.kind == "blocked"]
     assert blocked and all(w.obstacles for w in blocked)
@@ -410,6 +432,7 @@ def test_coarse_step_endpoints_only_never_cover_whole_range(base):
         analysis = analyze_departure_windows(
             plan, vehicle, scene,
             earliest_departure=0.0, latest_departure=8.0, step=coarse_step,
+            coverage_step=float("inf"),
         )
         assert analysis.probes_completed == 2
         verified = [w for w in analysis.windows if w.kind != "unverified"]
@@ -427,6 +450,7 @@ def test_coarse_step_endpoints_only_never_cover_whole_range(base):
     shifted = analyze_departure_windows(
         plan, vehicle, scene,
         earliest_departure=0.3, latest_departure=3.7, step=9.9,
+        coverage_step=float("inf"),
     )
     assert shifted.probes_requested == 2 and shifted.probes_completed == 2
     unknown = [w for w in shifted.windows if w.kind == "unverified"]
@@ -439,6 +463,7 @@ def test_coarse_step_endpoints_only_never_cover_whole_range(base):
     unchanged = analyze_departure_windows(
         plan, vehicle, scene,
         earliest_departure=0.0, latest_departure=8.0, step=8.0,
+        coverage_step=float("inf"),
         max_probes=0, prior=analysis,
     )
     assert unchanged.probes_this_round == 0
@@ -453,10 +478,76 @@ def test_coarse_step_endpoints_only_never_cover_whole_range(base):
         earliest_departure=0.0, latest_departure=8.0, step=0.5,
         max_probes=300, prior=analysis,
     )
-    assert expanded.probes_this_round == 15
+    assert len(expanded.newly_probed) == 15
+    assert expanded.newly_swept
     blocked = [w for w in expanded.windows if w.kind == "blocked"]
     assert blocked and all(w.obstacles for w in blocked)
     assert any(0.0 < w.start_time and w.end_time < 8.0 for w in blocked)
+
+
+def test_dense_points_still_need_independent_gap_coverage(base):
+    vehicle, data, plan = base
+    scene = changed_scene(data, BRIEF)
+    # The reported sequence: endpoints first, then 0.55 and 0.95. All four
+    # nominal moments pass, yet the object briefly occupies the route only
+    # in the gaps between those samples.
+    point_only = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.15, latest_departure=1.35, step=0.4,
+        coverage_step=float("inf"),
+    )
+    assert point_only.newly_probed == (0.15, 1.35, 0.55, 0.95)
+    assert [p.departure_time for p in point_only.probes] == [
+        0.15, 0.55, 0.95, 1.35
+    ]
+    assert all(p.feasible for p in point_only.probes)
+    safe = [w for w in point_only.windows if w.kind == "safe"]
+    assert len(safe) == 4
+    assert all(w.start_time == pytest.approx(w.end_time) for w in safe)
+    unknown = [w for w in point_only.windows if w.kind == "unverified"]
+    assert [pytest.approx(w.start_time, abs=1e-6) for w in unknown] == [0.15, 0.55, 0.95]
+    assert [pytest.approx(w.end_time, abs=1e-6) for w in unknown] == [0.55, 0.95, 1.35]
+    assert point_only.selected_departure == 0.15
+
+    # Re-opening with enough budget performs the independent continuous
+    # sweep: old point facts stay and are free; the short object surfaces
+    # as a narrow blocked interval instead of the four point verdicts being
+    # merged into one safe range.
+    covered = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.15, latest_departure=1.35, step=0.4,
+        coverage_step=0.01, max_probes=1000, prior=point_only,
+    )
+    assert covered.probes_this_round == len(covered.newly_swept)
+    assert covered.newly_probed == ()
+    assert all(w.kind != "unverified" for w in covered.windows)
+    blocked = [w for w in covered.windows if w.kind == "blocked"]
+    assert blocked and all(w.obstacles == ("trolley",) for w in blocked)
+    assert all(w.start_time > 0.15 and w.end_time < 1.35 for w in blocked)
+    assert covered.prior_selected_departure == 0.15
+    assert covered.prior_selection_status == "kept"
+
+    # A denser user grid with no coverage sweep cannot create continuous
+    # evidence either; it only adds more zero-width point facts.
+    refined = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.15, latest_departure=1.35, step=0.2,
+        coverage_step=float("inf"), max_probes=0, prior=point_only,
+    )
+    assert refined.newly_probed == () and refined.newly_swept == ()
+    assert any(w.kind == "unverified" for w in refined.windows)
+
+    # Revising the timetable invalidates the old selection and every old
+    # sweep fact: the point-vs-continuous coverage model is never reused
+    # across signatures.
+    revised = analyze_departure_windows(
+        plan, vehicle, changed_scene(data, AVOID),
+        earliest_departure=0.15, latest_departure=1.35, step=0.4,
+        coverage_step=0.01, max_probes=1000, prior=covered,
+    )
+    assert revised.historical_status == "needs_recheck"
+    assert revised.prior_selection_status == "invalidated"
+    assert revised.newly_swept and revised.continued is False
 
 
 def test_non_integer_start_and_step_resume_without_double_counting(base):
@@ -474,7 +565,11 @@ def test_non_integer_start_and_step_resume_without_double_counting(base):
         max_probes=300, prior=first,
     )
     assert resumed.probes_completed == resumed.probes_requested
-    assert resumed.probes_this_round == resumed.probes_requested - 3
+    assert len(resumed.newly_probed) == resumed.probes_requested - 3
+    assert len(resumed.newly_swept) > 0
+    assert resumed.probes_this_round == (
+        len(resumed.newly_probed) + len(resumed.newly_swept)
+    )
     assert set(resumed.newly_probed).isdisjoint(p.departure_time for p in first.probes)
     # Re-submitting the restored result costs nothing more.
     again = analyze_departure_windows(
@@ -543,7 +638,8 @@ def test_scene_change_invalidates_prior_evidence(base):
     # Old and new timetables are never stitched into one safe interval.
     assert resumed.historical_status == "needs_recheck"
     assert resumed.continued is False
-    assert resumed.probes_this_round == resumed.probes_completed
+    assert len(resumed.newly_probed) == resumed.probes_completed
+    assert len(resumed.newly_swept) > 0
     assert resumed.schedule_signature == scene_late.signature()
 
 

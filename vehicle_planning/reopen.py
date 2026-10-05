@@ -29,6 +29,12 @@ from .scene import Scene, load_scene
 from .vehicle import Vehicle, load_vehicle
 
 
+# Continuous coverage is independent evidence, never derived from the
+# user's sampling grid: gap intervals are replayed at this fixed fine
+# spacing, so enlarging --departure-step cannot manufacture a safe span.
+DEFAULT_COVERAGE_STEP = 0.05
+
+
 @dataclass(frozen=True)
 class ConflictInterval:
     """One continuous time window where the original route is blocked."""
@@ -313,6 +319,7 @@ class DepartureWindowAnalysis:
     earliest_departure: float
     latest_departure: float
     step: float
+    coverage_step: float
     probes_requested: int
     probes_completed: int
     budget_exhausted: bool
@@ -322,7 +329,9 @@ class DepartureWindowAnalysis:
     selected_verified: bool
     schedule_signature: str
     probes: tuple[DepartureProbe, ...] = ()
+    sweeps: tuple[DepartureProbe, ...] = ()
     newly_probed: tuple[float, ...] = ()
+    newly_swept: tuple[float, ...] = ()
     probes_this_round: int = 0
     scene_name: str = ""
     route_fingerprint: str = ""
@@ -348,15 +357,18 @@ class DepartureWindowAnalysis:
             "earliest_departure": round(self.earliest_departure, 3),
             "latest_departure": round(self.latest_departure, 3),
             "step": round(self.step, 3),
+            "coverage_step": round(self.coverage_step, 6),
             "probes_requested": self.probes_requested,
             "probes_completed": self.probes_completed,
             "probes_this_round": self.probes_this_round,
             "newly_probed": [round(value, 3) for value in self.newly_probed],
+            "newly_swept": [round(value, 3) for value in self.newly_swept],
             "continued": self.continued,
             "budget_exhausted": self.budget_exhausted,
             "boundaries": [item.to_dict() for item in self.boundaries],
             "windows": [item.to_dict() for item in self.windows],
             "probes": [item.to_dict() for item in self.probes],
+            "coverage_probes": [item.to_dict() for item in self.sweeps],
             "selected_departure": (
                 round(self.selected_departure, 3)
                 if self.selected_departure is not None
@@ -416,23 +428,28 @@ def analyze_departure_windows(
     earliest_departure: float = 0.0,
     latest_departure: float,
     step: float = 0.2,
+    coverage_step: float = DEFAULT_COVERAGE_STEP,
     max_probes: int = 300,
     prior: "DepartureWindowAnalysis | dict | None" = None,
 ) -> DepartureWindowAnalysis:
     """Classify a departure-time range into safe / blocked / unverified windows.
 
-    Evidence model: each probe is a point verdict for exactly one departure
-    time. Three evidence levels are reported strictly separately:
+    Evidence model: a probe is a point verdict for exactly one departure
+    time and, however dense the requested sampling grid happens to be,
+    never proves anything between two checked moments. Three evidence
+    levels are reported strictly separately:
 
-    * probed points: a lone probe stands for its own moment only (a
-      zero-width window) and is never extrapolated;
-    * continuous intervals: only adjacent probes no more than one step
-      apart share a cell boundary at their midpoint, so a continuous
-      safe/blocked span always rests on dense point evidence;
-    * unknown ranges: anything never probed (budget tail, gaps between
-      probes farther apart than the step, gaps left by a changed sampling
-      step, range edges) is reported as unverified and is never promoted
-      to safe or failure by midpoint splitting alone.
+    * probed points: every point verdict is a zero-width window at its
+      own moment and is never extrapolated;
+    * continuous intervals: only an independent coverage sweep that
+      replays the route at a fixed, user-independent fine spacing
+      (coverage_step) throughout an interval supplies continuous
+      evidence; adjacent checked moments no more than coverage_step
+      apart then share a cell boundary at their midpoint;
+    * unknown ranges: gaps without that independent sweep (budget tail,
+      gaps between point probes, gaps left by a changed sampling step,
+      range edges) are reported as unverified and are never promoted to
+      safe or failure merely because the requested step was reached.
 
     Boundary probes that were not reached are reported as unprobed, never
     as infeasible.
@@ -453,6 +470,8 @@ def analyze_departure_windows(
         raise ValueError("latest departure time must be >= earliest departure time")
     if step <= 0.0:
         raise ValueError("departure step must be positive")
+    if coverage_step <= 0.0:
+        raise ValueError("coverage step must be positive")
 
     aligned = (
         original
@@ -465,7 +484,8 @@ def analyze_departure_windows(
     historical_signature = None
     historical_status = "none"
     continued = False
-    evidence: dict[float, DepartureProbe] = {}
+    point_evidence: dict[float, DepartureProbe] = {}
+    coverage_evidence: dict[float, DepartureProbe] = {}
     prior_selected: float | None = None
     if prior is not None:
         prior_payload = (
@@ -484,15 +504,29 @@ def analyze_departure_windows(
             # Same timetable and same route: old point verdicts still apply.
             # Narrowing the range simply filters them; each kept probe stays
             # evidence for its exact departure time only.
-            for payload in prior_payload.get("probes", ()):
+            point_payloads = prior_payload.get("probes", ())
+            for payload in point_payloads:
                 probe = DepartureProbe.from_dict(payload)
                 if (
                     earliest_departure - 1e-9
                     <= probe.departure_time
                     <= latest_departure + 1e-9
                 ):
-                    evidence.setdefault(round(probe.departure_time, 9), probe)
-            continued = bool(evidence)
+                    key = round(probe.departure_time, 9)
+                    point_evidence.setdefault(key, probe)
+                    coverage_evidence.setdefault(key, probe)
+            # Saved continuous-sweep facts stay reusable, but their spacing
+            # is re-judged under the current coverage step: a coarse old
+            # sweep never proves gaps against a stricter current density.
+            for payload in prior_payload.get("coverage_probes", ()):
+                probe = DepartureProbe.from_dict(payload)
+                if (
+                    earliest_departure - 1e-9
+                    <= probe.departure_time
+                    <= latest_departure + 1e-9
+                ):
+                    coverage_evidence.setdefault(round(probe.departure_time, 9), probe)
+            continued = bool(point_evidence or coverage_evidence)
             historical_status = "same_timetable"
         else:
             historical_status = "needs_recheck"
@@ -511,30 +545,75 @@ def analyze_departure_windows(
 
     newly_probed: list[float] = []
     budget_exhausted = False
+    checks_used = 0
     for departure in grid:
-        if departure in evidence:
+        if departure in point_evidence:
             continue  # already checked in a previous round: not counted again
-        if len(newly_probed) >= max_probes:
+        if checks_used >= max_probes:
             budget_exhausted = True
             break
         feasible, names, _ = _probe_departure(aligned, vehicle, new_scene, departure)
-        evidence[departure] = DepartureProbe(departure, feasible, names)
+        probe = DepartureProbe(departure, feasible, names)
+        point_evidence[departure] = probe
+        coverage_evidence.setdefault(departure, probe)
         newly_probed.append(departure)
+        checks_used += 1
+
+    # Independent continuous evidence: fill each interval between adjacent
+    # nominal grid points on a fixed fine lattice anchored at the earliest
+    # departure, regardless of the user's sampling step. Filling starts
+    # from both edges of the whole range (smallest gaps first) so added
+    # budget only turns an interval into a conclusion when the sweep really
+    # reaches across it. A half-swept gap ends at the last checked moment.
+    sorted_grid = sorted(grid)
+    intervals = [
+        (left, right)
+        for left, right in zip(sorted_grid, sorted_grid[1:])
+        if left in point_evidence and right in point_evidence
+    ]
+    newly_swept: list[float] = []
+    for left, right in intervals if math.isfinite(coverage_step) else ():
+        sweep_moments: list[float] = [left]
+        index = 1
+        while True:
+            moment = round(earliest_departure + index * coverage_step, 9)
+            if moment >= right - 1e-9:
+                break
+            if left < moment < right:
+                sweep_moments.append(moment)
+            index += 1
+        sweep_moments.append(right)
+        for moment in sweep_moments:
+            if moment in coverage_evidence:
+                continue
+            if checks_used >= max_probes:
+                budget_exhausted = True
+                break
+            feasible, names, _ = _probe_departure(
+                aligned, vehicle, new_scene, moment
+            )
+            probe = DepartureProbe(moment, feasible, names)
+            coverage_evidence[moment] = probe
+            if moment not in point_evidence:
+                newly_swept.append(moment)
+            checks_used += 1
+        if budget_exhausted:
+            break
 
     boundaries = tuple(
         BoundaryProbe(
             label=("earliest" if index == 0 else "latest"),
             departure_time=value,
-            feasible=(evidence[round(value, 9)].feasible
-                      if round(value, 9) in evidence else None),
-            obstacles=(evidence[round(value, 9)].obstacles
-                       if round(value, 9) in evidence else ()),
-            probed=round(value, 9) in evidence,
+            feasible=(point_evidence[round(value, 9)].feasible
+                      if round(value, 9) in point_evidence else None),
+            obstacles=(point_evidence[round(value, 9)].obstacles
+                       if round(value, 9) in point_evidence else ()),
+            probed=round(value, 9) in point_evidence,
         )
         for index, value in enumerate((earliest_departure, latest_departure))
     )
 
-    ordered = [evidence[key] for key in sorted(evidence)]
+    ordered = [coverage_evidence[key] for key in sorted(coverage_evidence)]
     windows: list[DepartureWindow] = []
     cursor = earliest_departure
 
@@ -549,54 +628,29 @@ def analyze_departure_windows(
                 )
             )
 
-    # Each probe is a point verdict. A continuous span needs a dense chain
-    # of evidence: two adjacent verdicts may share a cell boundary at their
-    # midpoint only when no nominal grid moment strictly between them was
-    # left unchecked at a spacing no larger than the requested step (i.e.
-    # the two points are adjacent members of one dense, fully probed
-    # chain). Two probes with an unprobed nominal point between them never
-    # form such a link, even when their gap happens to equal one step (a
-    # coarse step or an exhausted budget cannot manufacture continuous
-    # coverage from isolated endpoints). Old evidence from a finer grid
-    # still links normally via the intermediate moments it really checked.
-    # Anything not covered by a cell stays unverified, so windows partition
-    # the range without overlaps or contradictions.
-    grid_set = {value for value in grid if value in evidence}
-    earliest_key = round(earliest_departure, 9)
-    latest_key = round(latest_departure, 9)
+    # Only the independent coverage sweep can bridge two moments. The
+    # user's sampling step is intentionally irrelevant here: a chain of
+    # point probes at exactly that spacing is still just isolated points.
+    # Coverage moments spaced no more than coverage_step apart link at
+    # their midpoint; every other gap stays unverified.
+    covered_keys = set(coverage_evidence)
 
     def densely_covered(previous_time: float, next_time: float) -> bool:
-        """True only when the gap rests on a fully probed dense grid chain.
-
-        Adjacent verdicts at most one step apart still need every nominal
-        interior grid point present as evidence; two isolated boundary
-        points therefore never cover the range between them on their own.
-        """
-
         gap = next_time - previous_time
-        if gap > step + 1e-9:
+        # An infinite coverage step requests points only (no independent
+        # sweep); zero-distance duplicates still carry no width.
+        if gap <= 1e-9:
+            return True
+        if not math.isfinite(coverage_step) or gap > coverage_step + 1e-9:
             return False
-        left_key = round(previous_time, 9)
         right_key = round(next_time, 9)
-        # When the two range boundaries are adjacent in the evidence, no
-        # moment between them was probed at all: isolated endpoints never
-        # prove the interior, however large the declared step is.
-        if (
-            latest_departure - earliest_departure > 1e-9
-            and left_key == earliest_key
-            and right_key == latest_key
-        ):
-            return False
-        # Nominal grid moments strictly inside the gap must all have been
-        # probed; iterating beyond one span also rejects endpoints that are
-        # adjacent only because the interior ran out of budget.
         offset = 1
-        expected = round(previous_time + step, 9)
+        expected = round(previous_time + coverage_step, 9)
         while expected < right_key - 1e-9:
-            if expected not in grid_set:
+            if expected not in covered_keys:
                 return False
             offset += 1
-            expected = round(previous_time + offset * step, 9)
+            expected = round(previous_time + offset * coverage_step, 9)
         return True
 
     cells: list[tuple[float, float]] = []
@@ -642,9 +696,9 @@ def analyze_departure_windows(
         cursor = max(cursor, right)
     emit_unverified(cursor, latest_departure)
 
-    # Annotate what each verified window actually covers: a merged window
-    # stands for its grid samples at the analysis step (endpoints included);
-    # a lone probe never implies its unchecked neighbours.
+    # Annotate what each verified window actually covers. A merged window
+    # rests on the independent fixed-spacing sweep; a lone point verdict
+    # never implies its unchecked neighbours.
     annotated: list[DepartureWindow] = []
     for window in windows:
         if window.kind in ("safe", "blocked"):
@@ -652,8 +706,8 @@ def analyze_departure_windows(
             if window.probes > 1:
                 note = (
                     f"连续{verdict}区间：覆盖 [{window.start_time:.3f}, {window.end_time:.3f}]s 内"
-                    f"步长不超过 {step}s 的 {window.probes} 个已核对采样点（含两端边界）；"
-                    "边界条件为相邻采样点逐一全程扫描结论一致"
+                    f"独立连续扫描间隔不超过 {coverage_step}s 的 {window.probes} 个已核对时刻；"
+                    "该结论不依赖用户采样步长，点间空隙已被实际逐一全程扫描"
                 )
             elif window.end_time - window.start_time <= 1e-9:
                 note = (
@@ -661,10 +715,7 @@ def analyze_departure_windows(
                     "两侧未核对范围保持未知，不外推"
                 )
             else:
-                note = (
-                    f"已测点：出发时刻已核对（{verdict}）；单元边界为与相邻已探测点"
-                    "（间距不超过步长）的中点，不代表未探测的更细时刻"
-                )
+                note = f"已测点：出发时刻已核对（{verdict}），相邻时刻由独立连续扫描支持"
             if window.kind == "blocked":
                 note += "；全程扫描到具体障碍占用"
             window = replace(window, note=note)
@@ -686,7 +737,7 @@ def analyze_departure_windows(
                 "旧证据全部重新核对，旧选择未沿用"
             )
         else:
-            old_probe = evidence.get(round(prior_selected, 9))
+            old_probe = coverage_evidence.get(round(prior_selected, 9))
             if old_probe is not None and old_probe.feasible:
                 prior_selection_status = "kept"
                 prior_selection_note = (
@@ -709,15 +760,20 @@ def analyze_departure_windows(
         earliest_departure=earliest_departure,
         latest_departure=latest_departure,
         step=step,
+        coverage_step=coverage_step,
         probes_requested=probes_requested,
-        probes_completed=len(evidence),
-        probes_this_round=len(newly_probed),
+        probes_completed=len(point_evidence),
+        probes_this_round=len(newly_probed) + len(newly_swept),
         newly_probed=tuple(newly_probed),
+        newly_swept=tuple(newly_swept),
         continued=continued,
         budget_exhausted=budget_exhausted,
         boundaries=boundaries,
         windows=tuple(annotated),
-        probes=tuple(ordered),
+        probes=tuple(
+            point_evidence[key] for key in sorted(point_evidence)
+        ),
+        sweeps=tuple(ordered),
         selected_departure=selected_departure,
         selected_verified=selected_departure is not None,
         schedule_signature=new_signature,
@@ -854,6 +910,7 @@ def evaluate_reopen(
     earliest_departure: float | None = None,
     latest_departure: float | None = None,
     departure_step: float = 0.2,
+    departure_coverage_step: float = DEFAULT_COVERAGE_STEP,
     departure_budget: int = 300,
     historical_report: dict | None = None,
 ) -> ReopenAssessment:
@@ -973,6 +1030,7 @@ def evaluate_reopen(
             earliest_departure=earliest_departure,
             latest_departure=latest_departure,
             step=departure_step,
+            coverage_step=departure_coverage_step,
             max_probes=departure_budget,
             prior=historical_report,
         )

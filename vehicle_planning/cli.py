@@ -66,6 +66,12 @@ def build_parser() -> argparse.ArgumentParser:
     reopen_parser.add_argument("--latest-departure", type=float, default=None)
     reopen_parser.add_argument("--departure-step", type=float, default=0.2)
     reopen_parser.add_argument(
+        "--departure-coverage-step",
+        type=float,
+        default=0.05,
+        help="fixed fine spacing for independent continuous gap coverage",
+    )
+    reopen_parser.add_argument(
         "--departure-budget",
         type=int,
         default=300,
@@ -159,6 +165,7 @@ def main(argv: list[str] | None = None) -> int:
             earliest_departure=args.earliest_departure,
             latest_departure=args.latest_departure,
             departure_step=args.departure_step,
+            departure_coverage_step=args.departure_coverage_step,
             departure_budget=args.departure_budget,
             historical_report=historical,
         )
