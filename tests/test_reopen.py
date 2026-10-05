@@ -399,6 +399,66 @@ def test_narrow_middle_conflict_not_hidden_by_sparse_probes(base):
     assert any(w.start_time > 0.0 and w.end_time < 8.0 for w in blocked)
 
 
+def test_coarse_step_endpoints_only_never_cover_whole_range(base):
+    vehicle, data, plan = base
+    scene = changed_scene(data, MIDDLE)
+    # A step as large as the whole span requests only the two endpoints.
+    # Both endpoints are feasible, but enlarging the step must not turn the
+    # unprobed interior into one continuous safe window: with no interior
+    # moment ever checked, the endpoints stay isolated point verdicts.
+    for coarse_step in (8.0, 20.0):
+        analysis = analyze_departure_windows(
+            plan, vehicle, scene,
+            earliest_departure=0.0, latest_departure=8.0, step=coarse_step,
+        )
+        assert analysis.probes_completed == 2
+        verified = [w for w in analysis.windows if w.kind != "unverified"]
+        assert len(verified) == 2
+        assert all(w.start_time == pytest.approx(w.end_time) for w in verified)
+        assert all(w.kind == "safe" for w in verified)
+        unknown = [w for w in analysis.windows if w.kind == "unverified"]
+        assert len(unknown) == 1
+        assert unknown[0].start_time == pytest.approx(0.0)
+        assert unknown[0].end_time == pytest.approx(8.0)
+        _assert_partition(analysis)
+
+    # Non-integer bounds behave identically: a step larger than the span
+    # probes the two boundary moments only; between them stays unknown.
+    shifted = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.3, latest_departure=3.7, step=9.9,
+    )
+    assert shifted.probes_requested == 2 and shifted.probes_completed == 2
+    unknown = [w for w in shifted.windows if w.kind == "unverified"]
+    assert len(unknown) == 1
+    assert unknown[0].start_time == pytest.approx(0.3)
+    assert unknown[0].end_time == pytest.approx(3.7)
+
+    # A zero-budget reopen changes no evidence: the two isolated endpoint
+    # points are reused for free and the interior remains unknown.
+    unchanged = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=8.0, step=8.0,
+        max_probes=0, prior=analysis,
+    )
+    assert unchanged.probes_this_round == 0
+    assert unchanged.probes_completed == 2
+    assert [w.kind for w in unchanged.windows] == ["safe", "unverified", "safe"]
+
+    # Extra budget at a real sampling step expands only the territory the
+    # new probes actually cover; the narrow middle conflict surfaces
+    # instead of being inherited from the endpoint agreement.
+    expanded = analyze_departure_windows(
+        plan, vehicle, scene,
+        earliest_departure=0.0, latest_departure=8.0, step=0.5,
+        max_probes=300, prior=analysis,
+    )
+    assert expanded.probes_this_round == 15
+    blocked = [w for w in expanded.windows if w.kind == "blocked"]
+    assert blocked and all(w.obstacles for w in blocked)
+    assert any(0.0 < w.start_time and w.end_time < 8.0 for w in blocked)
+
+
 def test_non_integer_start_and_step_resume_without_double_counting(base):
     vehicle, data, plan = base
     scene = changed_scene(data, AVOID)

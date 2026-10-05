@@ -549,12 +549,56 @@ def analyze_departure_windows(
                 )
             )
 
-    # Each probe is a point verdict. Its cell only extends to a neighbour
-    # probed at most one step away (boundary at their midpoint); a probe
-    # with no such neighbour keeps a zero-width cell at its own moment.
+    # Each probe is a point verdict. A continuous span needs a dense chain
+    # of evidence: two adjacent verdicts may share a cell boundary at their
+    # midpoint only when no nominal grid moment strictly between them was
+    # left unchecked at a spacing no larger than the requested step (i.e.
+    # the two points are adjacent members of one dense, fully probed
+    # chain). Two probes with an unprobed nominal point between them never
+    # form such a link, even when their gap happens to equal one step (a
+    # coarse step or an exhausted budget cannot manufacture continuous
+    # coverage from isolated endpoints). Old evidence from a finer grid
+    # still links normally via the intermediate moments it really checked.
     # Anything not covered by a cell stays unverified, so windows partition
-    # the range without overlaps or contradictions, and distant probes
-    # never get their midpoint treated as proven territory.
+    # the range without overlaps or contradictions.
+    grid_set = {value for value in grid if value in evidence}
+    earliest_key = round(earliest_departure, 9)
+    latest_key = round(latest_departure, 9)
+
+    def densely_covered(previous_time: float, next_time: float) -> bool:
+        """True only when the gap rests on a fully probed dense grid chain.
+
+        Adjacent verdicts at most one step apart still need every nominal
+        interior grid point present as evidence; two isolated boundary
+        points therefore never cover the range between them on their own.
+        """
+
+        gap = next_time - previous_time
+        if gap > step + 1e-9:
+            return False
+        left_key = round(previous_time, 9)
+        right_key = round(next_time, 9)
+        # When the two range boundaries are adjacent in the evidence, no
+        # moment between them was probed at all: isolated endpoints never
+        # prove the interior, however large the declared step is.
+        if (
+            latest_departure - earliest_departure > 1e-9
+            and left_key == earliest_key
+            and right_key == latest_key
+        ):
+            return False
+        # Nominal grid moments strictly inside the gap must all have been
+        # probed; iterating beyond one span also rejects endpoints that are
+        # adjacent only because the interior ran out of budget.
+        offset = 1
+        expected = round(previous_time + step, 9)
+        while expected < right_key - 1e-9:
+            if expected not in grid_set:
+                return False
+            offset += 1
+            expected = round(previous_time + offset * step, 9)
+        return True
+
     cells: list[tuple[float, float]] = []
     for index, probe in enumerate(ordered):
         at_time = probe.departure_time
@@ -562,11 +606,11 @@ def analyze_departure_windows(
         right = at_time
         if index > 0:
             previous_time = ordered[index - 1].departure_time
-            if at_time - previous_time <= step + 1e-9:
+            if densely_covered(previous_time, at_time):
                 left = (previous_time + at_time) / 2.0
         if index < len(ordered) - 1:
             next_time = ordered[index + 1].departure_time
-            if next_time - at_time <= step + 1e-9:
+            if densely_covered(at_time, next_time):
                 right = (at_time + next_time) / 2.0
         left = min(max(left, earliest_departure), latest_departure)
         right = min(max(right, earliest_departure), latest_departure)
